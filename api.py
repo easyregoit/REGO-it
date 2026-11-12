@@ -11,7 +11,7 @@ app = FastAPI(title="REGO Mosaic Studio API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Lock to ["https://rego-mu.vercel.app"] once tested
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -86,7 +86,7 @@ async def create_mosaic(
         z_mode=z_mode,
     )
 
-    xml_string = export_bricklink_xml(
+    export_bricklink_xml(
         bom=bom,
         xml_output_path=output_xml,
         grid_size=final_grid,
@@ -94,6 +94,7 @@ async def create_mosaic(
         condition="N",
     )
 
+    # Immediately purge raw customer photo after generating mosaic (Privacy compliance)
     if os.path.exists(input_path):
         os.remove(input_path)
 
@@ -110,12 +111,10 @@ async def create_mosaic(
         "total_studs": total_studs,
         "total_pieces": total_pieces,
         "reduction_pct": reduction_pct,
-        "preview_image": peek_b64,
         "blurred_preview_image": peek_b64,
-        "xml_content": xml_string,
     }
 
-s
+
 @app.get("/api/unlock/{order_id}")
 def unlock_order(order_id: str, x_internal_secret: str = Header(default="")):
     if x_internal_secret != INTERNAL_UNLOCK_SECRET:

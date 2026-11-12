@@ -4,3 +4,7 @@ orders/
 *.jpg
 *.xml
 .env
+
+auto_push.ps1
+index.html
+web_app.py

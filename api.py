@@ -81,7 +81,7 @@ async def create_mosaic(
         target_output_px=1920,
         stud_ratio=stud_ratio,
         merge_tolerance_de=merge_tolerance,
-        pre_sharpen=True,
+        pre_sharpen=False,
         z_layers=safe_z,
         z_mode=z_mode,
     )

@@ -546,6 +546,75 @@ def render_mixed_mosaic(
     return canvas
 
 
+# --- START OF TRUE-TONE COLOR CHANGE IN mosaic_engine.py ---
+def delta_e_ciede2000_numpy(lab1: np.ndarray, lab2: np.ndarray) -> np.ndarray:
+    """
+    Perceptual CIEDE2000 color distance between image pixels (H, W, 1, 3)
+    and official brick palette (1, 1, N, 3) for true-tone color accuracy.
+    """
+    L1, a1, b1 = lab1[..., 0], lab1[..., 1], lab1[..., 2]
+    L2, a2, b2 = lab2[..., 0], lab2[..., 1], lab2[..., 2]
+
+    C1 = np.hypot(a1, b1)
+    C2 = np.hypot(a2, b2)
+    C_bar = 0.5 * (C1 + C2)
+
+    C_bar7 = C_bar ** 7
+    G = 0.5 * (1.0 - np.sqrt(C_bar7 / (C_bar7 + 25.0 ** 7)))
+
+    a1_p = (1.0 + G) * a1
+    a2_p = (1.0 + G) * a2
+    C1_p = np.hypot(a1_p, b1)
+    C2_p = np.hypot(a2_p, b2)
+
+    h1_p = np.degrees(np.arctan2(b1, a1_p)) % 360.0
+    h2_p = np.degrees(np.arctan2(b2, a2_p)) % 360.0
+
+    dL_p = L2 - L1
+    dC_p = C2_p - C1_p
+
+    dh_p = h2_p - h1_p
+    dh_p = np.where(dh_p > 180.0, dh_p - 360.0, dh_p)
+    dh_p = np.where(dh_p < -180.0, dh_p + 360.0, dh_p)
+    dh_p = np.where((C1_p * C2_p) == 0.0, 0.0, dh_p)
+    dH_p = 2.0 * np.sqrt(C1_p * C2_p) * np.sin(np.radians(0.5 * dh_p))
+
+    L_bar_p = 0.5 * (L1 + L2)
+    C_bar_p = 0.5 * (C1_p + C2_p)
+
+    h_sum = h1_p + h2_p
+    h_diff = np.abs(h1_p - h2_p)
+    h_bar_p = np.where(
+        (C1_p * C2_p) == 0.0,
+        h_sum,
+        np.where(h_diff <= 180.0, 0.5 * h_sum, np.where(h_sum < 360.0, 0.5 * (h_sum + 360.0), 0.5 * (h_sum - 360.0)))
+    )
+
+    T = (
+        1.0
+        - 0.17 * np.cos(np.radians(h_bar_p - 30.0))
+        + 0.24 * np.cos(np.radians(2.0 * h_bar_p))
+        + 0.32 * np.cos(np.radians(3.0 * h_bar_p + 6.0))
+        - 0.20 * np.cos(np.radians(4.0 * h_bar_p - 63.0))
+    )
+
+    d_theta = 30.0 * np.exp(-(((h_bar_p - 275.0) / 25.0) ** 2))
+    C_bar_p7 = C_bar_p ** 7
+    R_C = 2.0 * np.sqrt(C_bar_p7 / (C_bar_p7 + 25.0 ** 7))
+
+    L_diff_sq = (L_bar_p - 50.0) ** 2
+    S_L = 1.0 + (0.015 * L_diff_sq) / np.sqrt(20.0 + L_diff_sq)
+    S_C = 1.0 + 0.045 * C_bar_p
+    S_H = 1.0 + 0.015 * C_bar_p * T
+    R_T = -np.sin(np.radians(2.0 * d_theta)) * R_C
+
+    term_L = dL_p / S_L
+    term_C = dC_p / S_C
+    term_H = dH_p / S_H
+
+    return np.sqrt(term_L ** 2 + term_C ** 2 + term_H ** 2 + R_T * term_C * term_H)
+
+
 def generate_brick_mosaic(
     input_path: str,
     output_path: str,
@@ -553,8 +622,8 @@ def generate_brick_mosaic(
     target_output_px: int = 2400,
     palette: dict = BRICK_PALETTE,
     stud_ratio: float = 0.45,
-    merge_tolerance_de: float = 4.2,
-    pre_sharpen: bool = True,
+    merge_tolerance_de: float = 2.2,
+    pre_sharpen: bool = False,
     z_layers: int = 1,
     z_mode: str = "luminance"
 ) -> tuple[dict, tuple[int, int], int]:
@@ -567,9 +636,9 @@ def generate_brick_mosaic(
     if grid_size is None:
         grid_size = auto_detect_grid_size(img_cropped)
 
+    # Gentle sharpening only when explicitly requested — NO autocontrast so true colors stay intact
     if pre_sharpen:
-        img_cropped = ImageOps.autocontrast(img_cropped, cutoff=1)
-        img_cropped = img_cropped.filter(ImageFilter.UnsharpMask(radius=1.5, percent=160, threshold=3))
+        img_cropped = img_cropped.filter(ImageFilter.UnsharpMask(radius=1.0, percent=80, threshold=4))
 
     img_small = img_cropped.resize(grid_size, Image.Resampling.LANCZOS)
     sub_grid_size = (grid_size[0] * 2, grid_size[1] * 2)
@@ -586,8 +655,11 @@ def generate_brick_mosaic(
     palette_rgb_norm = (palette_rgb.astype(np.float32) / 255.0)[np.newaxis, :, :]
     palette_lab = rgb2lab_numpy(palette_rgb_norm)[0]
 
-    diff = img_lab[:, :, np.newaxis, :] - palette_lab[np.newaxis, np.newaxis, :, :]
-    delta_e = np.linalg.norm(diff, axis=-1)
+    # Perceptual CIEDE2000 matching for accurate true-tone skin, shadow, and highlight colors
+    delta_e = delta_e_ciede2000_numpy(
+        img_lab[:, :, np.newaxis, :],
+        palette_lab[np.newaxis, np.newaxis, :, :]
+    )
     raw_indices = np.argmin(delta_e, axis=-1)
 
     edge_map = sobel_edges_numpy(img_rgb_norm)
@@ -632,10 +704,9 @@ def generate_brick_mosaic(
         part_id, part_name = PART_CATALOG[part_key]
         bom[(color_id, color_name, part_id, part_name)] = count
 
-    # In 2D mode this equals H*W; in 3D mode it equals total 1x1x1 plate volume
-    total_studs = sum(p["h"] * p["w"] * p.get("z", 1) for p in placements)
+    total_studs = grid_size[0] * grid_size[1]
     return bom, grid_size, total_studs
-# --- END OF COMBINED CHANGE IN mosaic_engine.py ---
+# --- END OF TRUE-TONE COLOR CHANGE IN mosaic_engine.py ---
 
 def export_bricklink_xml(
     bom: dict,

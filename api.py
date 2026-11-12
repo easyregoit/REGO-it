@@ -11,7 +11,7 @@ app = FastAPI(title="REGO Mosaic Studio API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Lock to ["https://rego-mu.vercel.app"] once tested
+    allow_origins=["*"],  # Restrict to ["https://rego-mu.vercel.app"] once live
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -57,7 +57,7 @@ async def create_mosaic(
     file: UploadFile = File(...),
     preset: str = Form("auto"),
     stud_ratio: float = Form(0.45),
-    merge_tolerance: float = Form(4.2),
+    merge_tolerance: float = Form(2.2),
     z_layers: int = Form(1),
     z_mode: str = Form("luminance"),
 ):
@@ -94,7 +94,6 @@ async def create_mosaic(
         condition="N",
     )
 
-    # Immediately purge raw customer photo after generating mosaic (Privacy compliance)
     if os.path.exists(input_path):
         os.remove(input_path)
 

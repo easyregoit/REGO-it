@@ -1,0 +1,6 @@
+__pycache__/
+orders/
+*.png
+*.jpg
+*.xml
+.env

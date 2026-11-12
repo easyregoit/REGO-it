@@ -11,7 +11,7 @@ app = FastAPI(title="REGO Mosaic Studio API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Restrict to ["https://rego-mu.vercel.app"] once live
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -86,7 +86,7 @@ async def create_mosaic(
         z_mode=z_mode,
     )
 
-    export_bricklink_xml(
+    xml_string = export_bricklink_xml(
         bom=bom,
         xml_output_path=output_xml,
         grid_size=final_grid,
@@ -110,7 +110,9 @@ async def create_mosaic(
         "total_studs": total_studs,
         "total_pieces": total_pieces,
         "reduction_pct": reduction_pct,
+        "preview_image": peek_b64,
         "blurred_preview_image": peek_b64,
+        "xml_content": xml_string,
     }
 
 

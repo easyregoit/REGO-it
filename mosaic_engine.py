@@ -901,6 +901,15 @@ def _draw_iso_brick(
                 )
 
 
+def _get_manual_font(size: int = 16):
+    """Loads a clean scaled font for '1x', '2x', '3x' quantities and step numbers."""
+    from PIL import ImageFont
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
+
+
 def generate_isometric_manual(
     surface_placements: list[dict],
     under_placements: list[dict],
@@ -910,53 +919,55 @@ def generate_isometric_manual(
     output_manual_path: str
 ) -> str:
     """
-    Renders an authentic LEGO-style 8-Step Isometric Instruction Booklet:
-    - Breaks every layer into manageable quadrant/band steps (never dumps everything into 2 steps).
-    - Uses the real LEGO instruction manual color palette (soft pastel-blue page #E4F0F8,
-      clean light-gray/white parts callout box with thin slate border, bold step numbers,
-      and red highlight outlines on newly added pieces).
+    100% Wordless LEGO-Style Isometric Instruction Manual:
+    - Callout boxes show ONLY the 3D isometric brick icon and '1x', '2x', '3x' quantity.
+    - Step panels show ONLY the step number ('1', '2', '3'...).
+    - Bottom 2D coordinate map shows ONLY numbered color swatches ('1', '2'...) and '1x', '2x' counts.
     """
     h, w = grid_size
     all_placements = under_placements + surface_placements
     max_z = max((p.get("z", 1) for p in all_placements), default=1)
-    mid_r, mid_c = h // 2, w // 2
 
-    # Build a digestible 6-to-8 step sequence ordered strictly bottom-to-top (Z=1..max_z) and back-to-front
-    raw_batches: list[tuple[str, list[dict]]] = []
+    font_qty = _get_manual_font(16)
+    font_step = _get_manual_font(28)
+    font_small = _get_manual_font(13)
+
+    # 1. Build 6-to-8 progressive steps ordered bottom-to-top (Z) and back-to-front (r+c)
+    raw_batches: list[list[dict]] = []
     for lz in range(1, max_z + 1):
         layer_pcs = [p for p in all_placements if p.get("z", 1) == lz]
         if not layer_pcs:
             continue
-        # Sort back-to-front along the isometric diagonal (r + c)
         layer_pcs.sort(key=lambda p: (p["r"] + p["c"], p["r"], p["c"]))
 
-        # Split each layer into 4 quadrant steps for 1-2 layer builds, or 2 band steps for 3-4 layer builds
         num_splits = 4 if max_z <= 2 else 2
         chunk_size = max(1, (len(layer_pcs) + num_splits - 1) // num_splits)
         for s_idx in range(0, len(layer_pcs), chunk_size):
-            batch = layer_pcs[s_idx:s_idx + chunk_size]
-            part_num = (s_idx // chunk_size) + 1
-            raw_batches.append((f"Layer {lz} (Section {part_num})", batch))
+            raw_batches.append(layer_pcs[s_idx:s_idx + chunk_size])
 
     steps = []
     accumulated: list[dict] = []
-    for step_num, (label, batch) in enumerate(raw_batches, start=1):
-        steps.append((step_num, label, list(accumulated), batch))
+    for step_num, batch in enumerate(raw_batches, start=1):
+        steps.append((step_num, list(accumulated), batch))
         accumulated.extend(batch)
 
-    # 2-Column Booklet Grid Layout (2 steps per row, just like open LEGO manual spreads)
     cols = 2
     rows = (len(steps) + cols - 1) // cols
     panel_w = 920
     panel_h = 520
     page_w = panel_w * cols
-    page_h = panel_h * rows
+    iso_section_h = panel_h * rows
+    map_section_h = 1220
+    page_h = iso_section_h + map_section_h
 
-    # Official LEGO Instruction Manual soft cool sky-blue background (#E4F0F8)
+    # Authentic LEGO Manual pastel sky-blue page background (#E4F0F8)
     manual = Image.new("RGB", (page_w, page_h), (228, 240, 248))
     draw = ImageDraw.Draw(manual)
 
-    for idx, (step_num, step_label, prior_pcs, active_pcs) in enumerate(steps):
+    # ==========================================================================
+    # PART A: WORDLESS 3D ISOMETRIC STEP PANELS (ONLY '1x', '2x', '3x' & STEP #)
+    # ==========================================================================
+    for idx, (step_num, prior_pcs, active_pcs) in enumerate(steps):
         row_idx = idx // cols
         col_idx = idx % cols
         px0 = col_idx * panel_w
@@ -964,12 +975,11 @@ def generate_isometric_manual(
         px1 = px0 + panel_w
         py1 = py0 + panel_h
 
-        # Crisp white LEGO page divider lines between step spreads
         draw.rectangle([px0, py0, px1, py1], fill=(228, 240, 248), outline=(255, 255, 255), width=4)
 
-        # Authentic LEGO Parts Callout Box (Top-Left of Step Panel)
+        # Parts Callout Box (2-column internal grid of mini 3D bricks + "1x", "2x", "3x")
         box_x0, box_y0 = px0 + 24, py0 + 24
-        box_x1, box_y1 = px0 + 295, py0 + 430
+        box_x1, box_y1 = px0 + 300, py0 + 425
         draw.rounded_rectangle(
             [box_x0, box_y0, box_x1, box_y1],
             radius=10,
@@ -978,49 +988,41 @@ def generate_isometric_manual(
             width=2
         )
 
-        # Large LEGO Step Number & Layer Subtitle right below the Parts Callout Box
-        draw.text((box_x0 + 6, box_y1 + 14), f"STEP {step_num}", fill=(30, 38, 48))
-        draw.text((box_x0 + 85, box_y1 + 14), f"— {step_label}  ({len(active_pcs)} pcs)", fill=(85, 100, 118))
+        # Large wordless Step Number ("1", "2", "3"...) below the callout box
+        draw.text((box_x0 + 8, box_y1 + 14), f"{step_num}", fill=(25, 32, 42), font=font_step)
 
-        # Tally parts for this step's Callout Box
         step_counts = Counter((p["color_idx"], p["part_key"], p["h"], p["w"], p["is_stud"]) for p in active_pcs)
-        top_step_parts = step_counts.most_common(6)
+        top_step_parts = step_counts.most_common(10)
 
-        item_y = box_y0 + 28
-        for (c_idx, p_key, ph, pw, is_st), qty in top_step_parts:
-            c_id, c_name = palette_keys[c_idx]
-            p_id, p_name = PART_CATALOG[p_key]
+        for p_idx, ((c_idx, p_key, ph, pw, is_st), qty) in enumerate(top_step_parts):
             rgb = tuple(int(v) for v in palette_rgb[c_idx])
+            p_col = p_idx % 2
+            p_row = p_idx // 2
 
-            # Mini isometric part preview inside callout box
+            cell_x = box_x0 + 18 + p_col * 132
+            cell_y = box_y0 + 26 + p_row * 76
+
+            # Draw mini 3D isometric brick
             _draw_iso_brick(
                 draw, r=0, c=0, h=min(2, ph), w=min(3, pw), z=1,
                 color_rgb=rgb, is_stud=is_st,
-                origin_x=box_x0 + 48, origin_y=item_y + 8,
-                u_x=8.5, u_y=4.25, z_px=3.6,
+                origin_x=cell_x + 28, origin_y=cell_y + 10,
+                u_x=7.5, u_y=3.75, z_px=3.2,
                 is_new_step=False
             )
-            short_shape = p_name.split("(")[0].replace("Plate ", "").replace("Tile ", "").strip()
-            draw.text((box_x0 + 98, item_y), f"{qty}x", fill=(20, 24, 30))
-            draw.text((box_x0 + 132, item_y), f"{c_name[:14]} {short_shape}", fill=(65, 75, 88))
-            item_y += 58
+            # Draw ONLY quantity ("1x", "2x", "3x"...) right next to the brick
+            draw.text((cell_x + 68, cell_y + 8), f"{qty}x", fill=(20, 24, 30), font=font_qty)
 
-        if len(step_counts) > 6:
-            rem_qty = sum(q for _, q in list(step_counts.items())[6:])
-            draw.text((box_x0 + 16, box_y1 - 26), f"+ {rem_qty} more detail pcs", fill=(100, 115, 130))
-
-        # Right-Side 3D Isometric Assembly View (True 2:1 Isometric Ratio & 0.40x Plate Height)
+        # Right-Side 3D Isometric Board Assembly
         u_x = min(9.5, max(3.6, 265.0 / max(h, w)))
         u_y = u_x * 0.50
-        z_px = u_x * 0.40  # True LEGO plate height-to-stud ratio so stacks look solid and low-profile
+        z_px = u_x * 0.40
         board_pixel_h = (h + w) * u_y
         iso_center_x = px0 + 605.0
         iso_origin_y = py0 + (panel_h - board_pixel_h) * 0.5 + 10.0
 
-        # 1. Draw the Baseplate with visible stud rings
         _draw_iso_baseplate(draw, h, w, iso_center_x, iso_origin_y, u_x, u_y, z_px)
 
-        # 2. Draw all bricks in strict Painter's order (bottom-to-top Z, back-to-front r+c)
         combined = [(False, p) for p in prior_pcs] + [(True, p) for p in active_pcs]
         combined.sort(key=lambda item: (item[1].get("z", 1), item[1]["r"] + item[1]["c"], item[1]["r"], item[1]["c"]))
 
@@ -1035,6 +1037,124 @@ def generate_isometric_manual(
                 u_x=u_x, u_y=u_y, z_px=z_px,
                 is_new_step=is_new
             )
+
+    # ==========================================================================
+    # PART B: WORDLESS 2D COORDINATE MAP & QUANTITY KEY ('1x', '2x', '3x' ONLY)
+    # ==========================================================================
+    map_y0 = iso_section_h
+    draw.rectangle([0, map_y0, page_w, page_h], fill=(238, 245, 250), outline=(255, 255, 255), width=4)
+
+    color_usage = Counter(p["color_idx"] for p in surface_placements)
+    color_num_map: dict[int, int] = {}
+    for rank_idx, (c_idx, _) in enumerate(color_usage.most_common(), start=1):
+        color_num_map[c_idx] = rank_idx
+
+    # Left Box: Wordless Color Swatch + Quantity ('1x', '2x', '3x')
+    leg_x0, leg_y0 = 24, map_y0 + 36
+    leg_x1, leg_y1 = 420, page_h - 24
+    draw.rounded_rectangle(
+        [leg_x0, leg_y0, leg_x1, leg_y1],
+        radius=12,
+        fill=(255, 255, 255),
+        outline=(176, 196, 214),
+        width=2
+    )
+
+    used_colors_sorted = color_usage.most_common()
+    for idx_c, (c_idx, pcs_count) in enumerate(used_colors_sorted[:32]):
+        key_num = color_num_map[c_idx]
+        rgb = tuple(int(v) for v in palette_rgb[c_idx])
+        lum = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
+        txt_col = (20, 24, 30) if lum > 140 else (255, 255, 255)
+
+        sub_col = idx_c // 16
+        sub_row = idx_c % 16
+        sx = leg_x0 + 24 + sub_col * 185
+        sy = leg_y0 + 24 + sub_row * 68
+
+        # Numbered Color Swatch
+        draw.rounded_rectangle([sx, sy, sx + 44, sy + 44], radius=6, fill=rgb, outline=(60, 70, 80), width=2)
+        num_str = str(key_num)
+        draw.text((sx + (16 if len(num_str) == 1 else 11), sy + 13), num_str, fill=txt_col, font=font_qty)
+
+        # ONLY Quantity ('1x', '2x', '3x'...) next to swatch — zero words
+        draw.text((sx + 56, sy + 13), f"{pcs_count}x", fill=(25, 32, 40), font=font_qty)
+
+    # Right Area: 2D Top-Down Stud Coordinate Grid
+    grid_area_x0 = 460
+    grid_area_y0 = map_y0 + 56
+    max_grid_px = 1100
+    cell_px = max(8, min(max_grid_px // max(h, w), 34))
+    grid_w_px = w * cell_px
+    grid_h_px = h * cell_px
+
+    gx0 = grid_area_x0 + (1340 - grid_w_px) // 2
+    gy0 = grid_area_y0 + (1120 - grid_h_px) // 2
+
+    draw.rectangle(
+        [gx0 - 36, gy0 - 36, gx0 + grid_w_px + 16, gy0 + grid_h_px + 16],
+        fill=(255, 255, 255),
+        outline=(160, 180, 200),
+        width=2
+    )
+
+    coord_step = 1 if max(h, w) <= 32 else (2 if max(h, w) <= 64 else 4)
+    for c in range(0, w, coord_step):
+        cx = gx0 + c * cell_px + cell_px // 4
+        draw.text((cx, gy0 - 22), str(c + 1), fill=(70, 85, 100), font=font_small)
+    for r in range(0, h, coord_step):
+        ry = gy0 + r * cell_px + cell_px // 4
+        draw.text((gx0 - 28, ry), str(r + 1), fill=(70, 85, 100), font=font_small)
+
+    for p in surface_placements:
+        r, c, ph, pw = p["r"], p["c"], p["h"], p["w"]
+        c_idx = p["color_idx"]
+        key_num = color_num_map.get(c_idx, 1)
+        rgb = tuple(int(v) for v in palette_rgb[c_idx])
+        bg_rgb = tuple(int(v) for v in palette_rgb[p["bg_color_idx"]])
+        lum = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
+        txt_col = (15, 20, 25) if lum > 140 else (250, 252, 255)
+        seam_col = (30, 35, 42)
+
+        x0 = gx0 + c * cell_px
+        y0 = gy0 + r * cell_px
+        x1 = x0 + pw * cell_px
+        y1 = y0 + ph * cell_px
+
+        if p["shape"] == "qtr_1x1":
+            draw_quarter_tile(draw, x0, y0, x1, y1, rgb, bg_rgb, p["orient"], seam_col)
+        elif p["shape"] in ("round_1x1", "round_2x2"):
+            draw.rectangle([x0, y0, x1, y1], fill=(35, 42, 50), outline=(70, 80, 90), width=1)
+            pad = max(1, cell_px // 8)
+            draw.ellipse([x0 + pad, y0 + pad, x1 - pad, y1 - pad], fill=rgb, outline=seam_col, width=2)
+        else:
+            draw.rectangle([x0, y0, x1, y1], fill=rgb, outline=seam_col, width=2)
+
+        if p["is_stud"] and cell_px >= 12:
+            s_pad = max(2, cell_px // 4)
+            ring_col = clamp_rgb(rgb, -32 if lum > 140 else 32)
+            for sr in range(ph):
+                for sc in range(pw):
+                    sx0 = x0 + sc * cell_px + s_pad
+                    sy0 = y0 + sr * cell_px + s_pad
+                    sx1 = x0 + (sc + 1) * cell_px - s_pad
+                    sy1 = y0 + (sr + 1) * cell_px - s_pad
+                    draw.ellipse([sx0, sy0, sx1, sy1], outline=ring_col, width=1)
+
+        label_str = str(key_num)
+        tx = (x0 + x1) // 2 - (4 * len(label_str))
+        ty = (y0 + y1) // 2 - 6
+        draw.text((tx, ty), label_str, fill=txt_col, font=font_small)
+
+    quad_line_col = (220, 38, 38)
+    for r_q in range(16, h, 16):
+        qy = gy0 + r_q * cell_px
+        draw.line([(gx0, qy), (gx0 + grid_w_px, qy)], fill=quad_line_col, width=3)
+    for c_q in range(16, w, 16):
+        qx = gx0 + c_q * cell_px
+        draw.line([(qx, gy0), (qx, gy0 + grid_h_px)], fill=quad_line_col, width=3)
+
+    draw.rectangle([gx0, gy0, gx0 + grid_w_px, gy0 + grid_h_px], outline=(20, 28, 36), width=3)
 
     manual.save(output_manual_path, format="PNG")
     return output_manual_path

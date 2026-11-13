@@ -323,18 +323,20 @@ def detect_boxed_grooves_and_preserve_lines(
 
     gray_u8 = np.clip(hi_gray * 255.0, 0, 255).astype(np.uint8)
     dilated_u8 = np.asarray(
-        Image.fromarray(gray_u8, mode="L").filter(ImageFilter.MaxFilter(size=max(3, factor | 1))),
+        Image.fromarray(gray_u8, mode="L").filter(ImageFilter.MaxFilter(size=3)),
         dtype=np.float32
     )
     valley_hi = (dilated_u8 - gray_u8.astype(np.float32)) / 255.0
 
     valley_blocks = valley_hi.reshape(gh, factor, gw, factor)
-    max_valley = np.max(valley_blocks, axis=(1, 3))
+    # Require the stroke to pass near the center of the stud cell so outlines stay 1-stud thin
+    center_slice = slice(factor // 4, max(factor // 4 + 1, (factor * 3) // 4))
+    center_valley = np.max(valley_blocks[:, center_slice, :, center_slice], axis=(1, 3))
 
-    active_valleys = max_valley[max_valley > 0.04]
-    dyn_thresh = float(np.quantile(active_valleys, 0.50)) if len(active_valleys) > 0 else 0.075
-    groove_thresh = max(0.065, min(0.13, dyn_thresh))
-    groove_mask = max_valley >= groove_thresh
+    active_valleys = center_valley[center_valley > 0.04]
+    dyn_thresh = float(np.quantile(active_valleys, 0.62)) if len(active_valleys) > 0 else 0.09
+    groove_thresh = max(0.08, min(0.15, dyn_thresh))
+    groove_mask = center_valley >= groove_thresh
 
     rgb_blocks = hi_rgb.reshape(gh, factor, gw, factor, 3).transpose(0, 2, 1, 3, 4).reshape(gh, gw, factor * factor, 3)
     luma_blocks = 0.2126 * rgb_blocks[..., 0] + 0.7152 * rgb_blocks[..., 1] + 0.0722 * rgb_blocks[..., 2]

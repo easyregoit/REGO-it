@@ -51,8 +51,18 @@ GRID_PRESETS = {
 }
 
 # Universal Part IDs (compatible with both BrickLink and BrickOwl XML importers)
+# Universal Part IDs (compatible with both BrickLink and BrickOwl XML importers)
 PART_CATALOG = {
-    # Rectangular Studded Plates
+    # Full-Height Standard Bricks (1 Brick = 3 Plates Tall)
+    "brick_2x4":       ("3001",  "Brick 2 x 4 (3-Plate Tall)"),
+    "brick_2x3":       ("3002",  "Brick 2 x 3 (3-Plate Tall)"),
+    "brick_2x2":       ("3003",  "Brick 2 x 2 (3-Plate Tall)"),
+    "brick_1x4":       ("3010",  "Brick 1 x 4 (3-Plate Tall)"),
+    "brick_1x3":       ("3622",  "Brick 1 x 3 (3-Plate Tall)"),
+    "brick_1x2":       ("3004",  "Brick 1 x 2 (3-Plate Tall)"),
+    "brick_1x1":       ("3005",  "Brick 1 x 1 (3-Plate Tall)"),
+
+    # Rectangular Studded Plates (1 Plate Tall)
     "plate_2x4":       ("3020",  "Plate 2 x 4 (Studded)"),
     "plate_2x3":       ("3021",  "Plate 2 x 3 (Studded)"),
     "plate_2x2":       ("3022",  "Plate 2 x 2 (Studded)"),
@@ -62,7 +72,7 @@ PART_CATALOG = {
     "plate_1x1":       ("3024",  "Plate 1 x 1 Square (Studded)"),
     "plate_round_1x1": ("4073",  "Plate 1 x 1 Round (Studded)"),
 
-    # Rectangular Smooth Flat Tiles (base IDs without 'b' import cleanly on BrickOwl & BrickLink)
+    # Rectangular Smooth Flat Tiles (1 Plate Tall, Smooth Top)
     "tile_2x4":        ("87079", "Tile 2 x 4 (Flat)"),
     "tile_2x2":        ("3068",  "Tile 2 x 2 (Flat)"),
     "tile_1x4":        ("2431",  "Tile 1 x 4 (Flat)"),
@@ -744,6 +754,17 @@ def compute_stable_terrace_z_grid(
 
     return z_grid
 
+PLATE_TO_BRICK_KEY = {
+    "plate_2x4": "brick_2x4",
+    "plate_2x3": "brick_2x3",
+    "plate_2x2": "brick_2x2",
+    "plate_1x4": "brick_1x4",
+    "plate_1x3": "brick_1x3",
+    "plate_1x2": "brick_1x2",
+    "plate_1x1": "brick_1x1",
+}
+
+
 def build_interlocking_layers(
     nearest_indices: np.ndarray,
     stud_mask: np.ndarray,
@@ -753,11 +774,15 @@ def build_interlocking_layers(
     palette_keys: list[tuple[int, str]],
     z_grid: np.ndarray,
     groove_mask: np.ndarray | None = None,
-    filler_color_id: int = 86  # 86 = Light Bluish Gray structural plates
+    filler_color_id: int = 86  # 86 = Light Bluish Gray structural bricks & plates
 ) -> tuple[list[dict], list[dict]]:
     """
-    Packs the mosaic strictly layer-by-layer from Z = 1 up to max_z with 90-degree
-    cross-seam interlocking, keeping boxed letters crisp with square plates/tiles.
+    Packs 2D and 3D mosaics with 3-Plate = 1-Brick vertical optimization AND 90-degree seam interlocking:
+    - Where z_grid == 4: Layers Z=1..3 merge into a single 3-plate-tall structural Brick (z_span=3),
+      and the top surface at Z=4 packs rotated 90 degrees across the brick seams.
+    - Where z_grid == 3 and stud_mask is True: Layers Z=1..3 merge into a single 3-plate-tall
+      surface-colored Brick (z_span=3) anchored directly to the baseplate.
+    - All other layers pack with 90-degree alternating cross-seam plates/tiles.
     """
     h, w = nearest_indices.shape
     max_z = int(np.max(z_grid))
@@ -786,21 +811,103 @@ def build_interlocking_layers(
         (2, 4, "tile_2x4"), (1, 4, "tile_1x4"), (1, 3, "tile_1x3"), (1, 2, "tile_1x2"),
     ]
 
-    high_edge_thresh = np.quantile(edge_map, 0.75)
-
     surface_placements: list[dict] = []
     under_placements: list[dict] = []
-    prev_seam_grid = np.zeros((h, w), dtype=np.int32)
+
+    # Track which (z, r, c) stud-voxels are already occupied by a 3-plate-tall Brick
+    occupied = np.zeros((max_z + 1, h, w), dtype=bool)
+    seam_grids = np.zeros((max_z + 1, h, w), dtype=np.int32)
     uid = 1
 
+    # ==========================================================================
+    # PASS 0: 3-PLATE = 1-BRICK VERTICAL + HORIZONTAL MERGE (WHEN MAX_Z >= 3)
+    # ==========================================================================
+    if max_z >= 3:
+        # 0A. Where z_grid >= 4, pack 3-plate-tall low-cost Filler Bricks spanning Z=1..3
+        brick_under_mask = (z_grid >= 4)
+        bu_visited = ~brick_under_mask
+        for r in range(h):
+            for c in range(w):
+                if bu_visited[r, c]:
+                    continue
+                best_shape = (1, 1, "plate_1x1")
+                for sh, sw, p_key in horiz_First:
+                    b_key = PLATE_TO_BRICK_KEY[p_key]
+                    if not is_part_available(b_key, filler_color_id):
+                        continue
+                    if r + sh <= h and c + sw <= w and not np.any(bu_visited[r:r + sh, c:c + sw]):
+                        best_shape = (sh, sw, p_key)
+                        break
+                sh, sw, p_key = best_shape
+                b_key = PLATE_TO_BRICK_KEY[p_key]
+                bu_visited[r:r + sh, c:c + sw] = True
+                occupied[1:4, r:r + sh, c:c + sw] = True
+                uid += 1
+                seam_grids[3, r:r + sh, c:c + sw] = uid
+                under_placements.append({
+                    "r": r, "c": c, "h": sh, "w": sw,
+                    "z": 3, "z_span": 3,
+                    "color_idx": filler_idx,
+                    "bg_color_idx": filler_idx,
+                    "part_key": b_key,
+                    "is_stud": True,
+                    "shape": "rect",
+                    "orient": None,
+                    "is_structural": True,
+                })
+
+        # 0B. Where z_grid == 3 AND stud_mask is True (not a groove), pack 1-piece Surface Bricks spanning Z=1..3
+        no_groove = (~groove_mask) if groove_mask is not None else np.ones((h, w), dtype=bool)
+        surf_brick_mask = (z_grid == 3) & stud_mask & no_groove & (~occupied[3])
+        sb_visited = ~surf_brick_mask
+        for r in range(h):
+            for c in range(w):
+                if sb_visited[r, c]:
+                    continue
+                color_idx = int(nearest_indices[r, c])
+                color_id = palette_keys[color_idx][0]
+                best_shape = (1, 1, "plate_1x1")
+                for sh, sw, p_key in horiz_First:
+                    b_key = PLATE_TO_BRICK_KEY[p_key]
+                    if not is_part_available(b_key, color_id):
+                        continue
+                    if r + sh <= h and c + sw <= w:
+                        if (not np.any(sb_visited[r:r + sh, c:c + sw])
+                                and np.all(nearest_indices[r:r + sh, c:c + sw] == color_idx)):
+                            best_shape = (sh, sw, p_key)
+                            break
+                sh, sw, p_key = best_shape
+                b_key = PLATE_TO_BRICK_KEY[p_key]
+                if not is_part_available(b_key, color_id):
+                    continue  # Fallback to standard plates if color is not made in full bricks
+                sb_visited[r:r + sh, c:c + sw] = True
+                occupied[1:4, r:r + sh, c:c + sw] = True
+                uid += 1
+                seam_grids[3, r:r + sh, c:c + sw] = uid
+                surface_placements.append({
+                    "r": r, "c": c, "h": sh, "w": sw,
+                    "z": 3, "z_span": 3,
+                    "color_idx": color_idx,
+                    "bg_color_idx": color_idx,
+                    "part_key": b_key,
+                    "is_stud": True,
+                    "shape": "rect",
+                    "orient": None,
+                    "is_structural": False,
+                })
+
+    # ==========================================================================
+    # PASS 1..MAX_Z: PACK REMAINING PLATES & TILES WITH 90° SEAM INTERLOCKING
+    # ==========================================================================
     for lz in range(1, max_z + 1):
-        curr_seam_grid = np.zeros((h, w), dtype=np.int32)
+        prev_seam_grid = seam_grids[lz - 1]
+        curr_seam_grid = seam_grids[lz].copy()
         odd_layer = (lz % 2 == 1)
         plate_order = horiz_First if odd_layer else vert_First
         tile_order = horiz_Tiles if odd_layer else vert_Tiles
 
-        # 1. Pack structural studded under-plates for all cells where z_grid > lz
-        struct_visited = ~(z_grid > lz)
+        # 1. Pack structural studded under-plates for remaining unoccupied cells where z_grid > lz
+        struct_visited = (~(z_grid > lz)) | occupied[lz]
         for r in range(h):
             for c in range(w):
                 if struct_visited[r, c]:
@@ -820,10 +927,12 @@ def build_interlocking_layers(
                             break
                 sh, sw, part_key = best_shape
                 struct_visited[r:r + sh, c:c + sw] = True
+                occupied[lz, r:r + sh, c:c + sw] = True
                 uid += 1
                 curr_seam_grid[r:r + sh, c:c + sw] = uid
                 under_placements.append({
-                    "r": r, "c": c, "h": sh, "w": sw, "z": lz,
+                    "r": r, "c": c, "h": sh, "w": sw,
+                    "z": lz, "z_span": 1,
                     "color_idx": filler_idx,
                     "bg_color_idx": filler_idx,
                     "part_key": part_key,
@@ -833,14 +942,14 @@ def build_interlocking_layers(
                     "is_structural": True,
                 })
 
-        # 2. Pack visible surface pieces for all cells where z_grid == lz
-        surf_visited = ~(z_grid == lz)
+        # 2. Pack visible surface plates & flat tiles for unoccupied cells where z_grid == lz
+        surf_visited = (~(z_grid == lz)) | occupied[lz]
         for r in range(h):
             for c in range(w):
                 if surf_visited[r, c]:
                     continue
                 if groove_mask is not None and groove_mask[r, c]:
-                    continue  # Keep 1-stud contour grooves sharp before packing multi-stud blocks
+                    continue
                 color_idx = int(nearest_indices[r, c])
                 color_id = palette_keys[color_idx][0]
                 is_stud = bool(stud_mask[r, c])
@@ -871,10 +980,12 @@ def build_interlocking_layers(
                 if best_candidate is not None:
                     sh, sw, part_key = best_candidate
                     surf_visited[r:r + sh, c:c + sw] = True
+                    occupied[lz, r:r + sh, c:c + sw] = True
                     uid += 1
                     curr_seam_grid[r:r + sh, c:c + sw] = uid
                     surface_placements.append({
-                        "r": r, "c": c, "h": sh, "w": sw, "z": lz,
+                        "r": r, "c": c, "h": sh, "w": sw,
+                        "z": lz, "z_span": 1,
                         "color_idx": color_idx,
                         "bg_color_idx": color_idx,
                         "part_key": part_key,
@@ -884,12 +995,13 @@ def build_interlocking_layers(
                         "is_structural": False,
                     })
 
-        # 3. Remaining 1x1 detail & contour groove cells on Layer lz (uses square 1x1s to prevent black gaps)
+        # 3. Remaining 1x1 detail & contour groove cells on Layer lz
         for r in range(h):
             for c in range(w):
                 if surf_visited[r, c]:
                     continue
                 surf_visited[r, c] = True
+                occupied[lz, r, c] = True
                 uid += 1
                 curr_seam_grid[r, c] = uid
                 color_idx = int(nearest_indices[r, c])
@@ -911,7 +1023,8 @@ def build_interlocking_layers(
                     )
                     if improvement > 9.5:
                         surface_placements.append({
-                            "r": r, "c": c, "h": 1, "w": 1, "z": lz,
+                            "r": r, "c": c, "h": 1, "w": 1,
+                            "z": lz, "z_span": 1,
                             "color_idx": color_idx,
                             "bg_color_idx": bg_color_idx,
                             "part_key": "tile_qtr_1x1",
@@ -925,7 +1038,8 @@ def build_interlocking_layers(
                 if not placed_curve:
                     part_key = "plate_1x1" if is_stud else "tile_1x1"
                     surface_placements.append({
-                        "r": r, "c": c, "h": 1, "w": 1, "z": lz,
+                        "r": r, "c": c, "h": 1, "w": 1,
+                        "z": lz, "z_span": 1,
                         "color_idx": color_idx,
                         "bg_color_idx": color_idx,
                         "part_key": part_key,
@@ -935,7 +1049,7 @@ def build_interlocking_layers(
                         "is_structural": False,
                     })
 
-        prev_seam_grid = curr_seam_grid
+        seam_grids[lz] = curr_seam_grid
 
     return surface_placements, under_placements
 
@@ -946,10 +1060,6 @@ def render_mixed_mosaic(
     grid_size: tuple[int, int],
     target_output_px: int = 2400
 ) -> Image.Image:
-    """
-    Renders 2D and 3D mosaics with crisp step-relief shading so elevated boxed letters
-    and plateaus stand out cleanly without shifting over and covering 1-stud outlines.
-    """
     h, w = grid_size
     scale_factor = max(20, target_output_px // max(h, w))
     baseplate_rgb = (24, 28, 34)
@@ -973,7 +1083,6 @@ def render_mixed_mosaic(
         base_color = tuple(int(v) for v in palette_rgb[p["color_idx"]])
         bg_color = tuple(int(v) for v in palette_rgb[p["bg_color_idx"]])
 
-        # Subtle depth lighting: top layer is brightest; recessed grooves/layers are slightly shaded
         z_boost = (z - max_z) * 10 if max_z > 1 else 0
         face_color = clamp_rgb(base_color, z_boost)
         highlight = clamp_rgb(face_color, 36)
@@ -982,7 +1091,6 @@ def render_mixed_mosaic(
         seam = clamp_rgb(base_color, -68)
 
         if z > 1:
-            # Draw subtle 3D side wall & drop-shadow without swallowing adjacent 1-stud grooves
             sh_pad = max(2, elev_offset + 1)
             draw.rectangle(
                 [raw_x0 + sh_pad, raw_y0 + sh_pad,
@@ -1035,7 +1143,6 @@ def _draw_iso_baseplate(
     origin_x: float, origin_y: float,
     u_x: float, u_y: float, z_px: float
 ):
-    """Draws an authentic LEGO Dark Bluish Gray baseplate with visible stud grid rings."""
     def proj(row: float, col: float, layer_z: float) -> tuple[float, float]:
         return (origin_x + (col - row) * u_x, origin_y + (col + row) * u_y - layer_z * z_px)
 
@@ -1078,8 +1185,12 @@ def _draw_iso_brick(
     is_stud: bool,
     origin_x: float, origin_y: float,
     u_x: float, u_y: float, z_px: float,
-    is_new_step: bool = False
+    is_new_step: bool = False,
+    z_span: int = 1
 ):
+    """
+    Draws a 3D isometric Plate/Tile (`z_span=1`) or full 3-plate-tall Brick (`z_span=3`).
+    """
     def proj(row: float, col: float, layer_z: float) -> tuple[float, float]:
         return (origin_x + (col - row) * u_x, origin_y + (col + row) * u_y - layer_z * z_px)
 
@@ -1090,7 +1201,7 @@ def _draw_iso_brick(
     stud_outline = (55, 60, 66)
 
     z_top = float(z)
-    z_bot = float(z - 1)
+    z_bot = float(z - z_span)
 
     p_top = proj(r, c, z_top)
     p_right = proj(r, c + w, z_top)
@@ -1149,9 +1260,10 @@ def generate_isometric_manual(
     font_step = _get_manual_font(28)
     font_small = _get_manual_font(13)
 
+    # Order steps by base level (z - z_span + 1) so 3-plate Bricks placed on the baseplate build in Step 1..2
     raw_batches: list[list[dict]] = []
-    for lz in range(1, max_z + 1):
-        layer_pcs = [p for p in all_placements if p.get("z", 1) == lz]
+    for base_z in range(1, max_z + 1):
+        layer_pcs = [p for p in all_placements if (p.get("z", 1) - p.get("z_span", 1) + 1) == base_z]
         if not layer_pcs:
             continue
         layer_pcs.sort(key=lambda p: (p["r"] + p["c"], p["r"], p["c"]))
@@ -1201,10 +1313,13 @@ def generate_isometric_manual(
 
         draw.text((box_x0 + 8, box_y1 + 14), f"{step_num}", fill=(25, 32, 42), font=font_step)
 
-        step_counts = Counter((p["color_idx"], p["part_key"], p["h"], p["w"], p["is_stud"]) for p in active_pcs)
+        step_counts = Counter(
+            (p["color_idx"], p["part_key"], p["h"], p["w"], p["is_stud"], p.get("z_span", 1))
+            for p in active_pcs
+        )
         top_step_parts = step_counts.most_common(10)
 
-        for p_idx, ((c_idx, p_key, ph, pw, is_st), qty) in enumerate(top_step_parts):
+        for p_idx, ((c_idx, p_key, ph, pw, is_st, z_sp), qty) in enumerate(top_step_parts):
             rgb = tuple(int(v) for v in palette_rgb[c_idx])
             p_col = p_idx % 2
             p_row = p_idx // 2
@@ -1213,11 +1328,12 @@ def generate_isometric_manual(
             cell_y = box_y0 + 26 + p_row * 76
 
             _draw_iso_brick(
-                draw, r=0, c=0, h=min(2, ph), w=min(3, pw), z=1,
+                draw, r=0, c=0, h=min(2, ph), w=min(3, pw), z=z_sp,
                 color_rgb=rgb, is_stud=is_st,
-                origin_x=cell_x + 28, origin_y=cell_y + 10,
+                origin_x=cell_x + 28, origin_y=cell_y + 10 + (6 if z_sp > 1 else 0),
                 u_x=7.5, u_y=3.75, z_px=3.2,
-                is_new_step=False
+                is_new_step=False,
+                z_span=z_sp
             )
             draw.text((cell_x + 68, cell_y + 8), f"{qty}x", fill=(20, 24, 30), font=font_qty)
 
@@ -1231,7 +1347,14 @@ def generate_isometric_manual(
         _draw_iso_baseplate(draw, h, w, iso_center_x, iso_origin_y, u_x, u_y, z_px)
 
         combined = [(False, p) for p in prior_pcs] + [(True, p) for p in active_pcs]
-        combined.sort(key=lambda item: (item[1].get("z", 1), item[1]["r"] + item[1]["c"], item[1]["r"], item[1]["c"]))
+        combined.sort(
+            key=lambda item: (
+                item[1].get("z", 1) - item[1].get("z_span", 1),
+                item[1]["r"] + item[1]["c"],
+                item[1]["r"],
+                item[1]["c"]
+            )
+        )
 
         for is_new, p in combined:
             rgb = tuple(int(v) for v in palette_rgb[p["color_idx"]])
@@ -1242,7 +1365,8 @@ def generate_isometric_manual(
                 is_stud=p["is_stud"],
                 origin_x=iso_center_x, origin_y=iso_origin_y,
                 u_x=u_x, u_y=u_y, z_px=z_px,
-                is_new_step=is_new
+                is_new_step=is_new,
+                z_span=p.get("z_span", 1)
             )
 
     map_y0 = iso_section_h
@@ -1357,7 +1481,6 @@ def generate_isometric_manual(
 
     manual.save(output_manual_path, format="PNG")
     return output_manual_path
-
 
 # --- START OF TRUE-TONE COLOR CHANGE IN mosaic_engine.py ---
 def delta_e_ciede2000_numpy(lab1: np.ndarray, lab2: np.ndarray) -> np.ndarray:

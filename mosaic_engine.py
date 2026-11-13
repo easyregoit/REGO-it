@@ -525,16 +525,14 @@ def compute_stable_terrace_z_grid(
     groove_mask: np.ndarray | None = None
 ) -> np.ndarray:
     """
-    Clean, Non-Messy 3D Layer Allocator (No circular halos, no noisy bumps):
-    - Layer 1: Entire background (locked flat at Z=1).
-    - Layer z_layers (Top): Main foreground subject & boxed letter faces (solid flat plateau).
-    - Layer z_layers - 1 (Recessed groove): Only dark outline grooves and darker shaded side walls.
+    Crisp Lettering 3D Layer Allocator:
+    - Layer 1: Background & Letter Grooves / Outlines (carved deep down so words are readable).
+    - Layer z_layers (Top): Main foreground subject & letter faces (solid flat plateau).
     """
     h, w = grid_size
     if z_layers <= 1:
         return np.ones((h, w), dtype=np.int32)
 
-    # 1. Measure color distance from the outer border so background is 100% flat at Z=1
     b_pad = max(2, min(h, w) // 12)
     border_lab = np.concatenate([
         img_lab[:b_pad, :, :].reshape(-1, 3),
@@ -554,12 +552,10 @@ def compute_stable_terrace_z_grid(
         90
     ))
 
-    # Any cell that matches the border color is strictly background (Z=1)
     is_subject = min_bg_dist > max(14.0, border_noise * 2.5)
     if fg_mask_grid is not None:
         is_subject = is_subject & fg_mask_grid
 
-    # Clean tiny 1-stud islands in the subject mask
     s_img = Image.fromarray((is_subject.astype(np.uint8) * 255), mode="L")
     s_img = s_img.filter(ImageFilter.MedianFilter(size=3))
     is_subject = np.asarray(s_img) > 127
@@ -568,32 +564,14 @@ def compute_stable_terrace_z_grid(
     if not np.any(is_subject):
         return z_grid
 
-    # 2. Elevate the entire subject cleanly to the top plateau (z_layers)
+    # Elevate subject to top plateau
     z_grid[is_subject] = z_layers
 
-    # 3. Step down ONLY the darker shaded side panels and thin contour grooves by 1 layer
-    mid_z = max(1, z_layers - 1)
-    subj_L = img_lab[..., 0][is_subject]
-    if len(subj_L) > 0:
-        # Only step down a region if it is noticeably darker than the main subject face
-        median_L = float(np.median(subj_L))
-        is_darker_side = is_subject & (img_lab[..., 0] < (median_L - 8.0))
-        z_grid[is_darker_side] = mid_z
-
+    # Carve letter outlines and internal grooves ALL THE WAY DOWN to Z=1 so words stand out cleanly!
     if groove_mask is not None:
-        z_grid[is_subject & groove_mask] = mid_z
+        z_grid[is_subject & groove_mask] = 1
 
     return z_grid
-
-PLATE_TO_BRICK_KEY = {
-    "plate_2x4": "brick_2x4",
-    "plate_2x3": "brick_2x3",
-    "plate_2x2": "brick_2x2",
-    "plate_1x4": "brick_1x4",
-    "plate_1x3": "brick_1x3",
-    "plate_1x2": "brick_1x2",
-    "plate_1x1": "brick_1x1",
-}
 
 
 def build_interlocking_layers(

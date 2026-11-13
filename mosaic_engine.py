@@ -388,25 +388,46 @@ def draw_quarter_tile(
 
 
 # --- START OF COMBINED CHANGE IN mosaic_engine.py ---
+_U2NETP_SESSION = None
+
+
+def extract_neural_foreground_mask(img_pil: Image.Image) -> np.ndarray | None:
+    """
+    Runs the lightweight 4.7 MB 'u2netp' neural model via rembg (cached globally
+    so Render Free Tier RAM stays under ~160 MB) and returns a boolean subject mask.
+    """
+    global _U2NETP_SESSION
+    try:
+        from rembg import remove, new_session  # type: ignore
+        if _U2NETP_SESSION is None:
+            # Store model weights in /tmp/.u2net so Render's ephemeral filesystem has write access
+            os.environ.setdefault("U2NET_HOME", "/tmp/.u2net")
+            _U2NETP_SESSION = new_session("u2netp")
+
+        work_img = img_pil.resize((256, 256), Image.Resampling.BILINEAR)
+        mask_pil = remove(work_img, session=_U2NETP_SESSION, only_mask=True)
+        mask_arr = np.asarray(mask_pil, dtype=np.float32)
+        if mask_arr.ndim == 3:
+            mask_arr = mask_arr[..., 0]
+        fg_mask = mask_arr > 95.0
+        if 0.04 < float(np.mean(fg_mask)) < 0.94:
+            return fg_mask
+    except Exception:
+        pass
+    return None
+
+
 def filter_background_and_abstract_subject(
     img_cropped: Image.Image,
     palette_keys: list[tuple[int, str]]
 ) -> tuple[Image.Image, np.ndarray, int]:
     """
-    Isolates the foreground subject, replaces busy backgrounds with a clean studio
+    Isolates the foreground subject using the cached 4 MB 'u2netp' neural session
+    (with pure-NumPy CIELAB fallback), replaces busy backgrounds with a clean studio
     brick color, and applies edge-preserving abstraction for 32x32 frame builds.
     """
     work_img = img_cropped.resize((256, 256), Image.Resampling.BILINEAR)
-    fg_mask = None
-
-    try:
-        from rembg import remove  # type: ignore
-        rgba = remove(work_img)
-        alpha = np.asarray(rgba)[..., 3].astype(np.float32) / 255.0
-        if np.mean(alpha > 0.35) > 0.08:
-            fg_mask = alpha > 0.35
-    except Exception:
-        fg_mask = None
+    fg_mask = extract_neural_foreground_mask(work_img)
 
     rgb_norm = np.asarray(work_img.convert("RGB"), dtype=np.float32) / 255.0
     lab = rgb2lab_numpy(rgb_norm)
@@ -1396,6 +1417,14 @@ def generate_brick_mosaic(
     else:
         if grid_size is None:
             grid_size = auto_detect_grid_size(img_cropped)
+        # In 3D mode, use the 4.7 MB u2netp neural mask to isolate the subject from any background
+        if z_layers > 1:
+            neural_mask_256 = extract_neural_foreground_mask(img_cropped)
+            if neural_mask_256 is not None:
+                fg_mask_img = Image.fromarray((neural_mask_256.astype(np.uint8) * 255), mode="L").resize(
+                    grid_size, Image.Resampling.NEAREST
+                )
+                fg_mask_grid = np.asarray(fg_mask_img) > 127
 
     # Detect thin boxed letter outlines & structural grooves at 512x512 BEFORE downsampling
     groove_mask, dark_sub_rgb = detect_boxed_grooves_and_preserve_lines(img_cropped, grid_size)

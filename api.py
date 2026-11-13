@@ -6,7 +6,7 @@ from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from PIL import Image, ImageDraw, ImageFilter
-from mosaic_engine import generate_brick_mosaic, export_bricklink_xml
+from mosaic_engine import generate_brick_mosaic, export_bricklink_xml, create_demo_image
 
 app = FastAPI(title="REGO Mosaic Studio API")
 
@@ -56,21 +56,38 @@ def serve_home():
     index_path = os.path.join(script_dir, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)
-    return {"status": "REGO Mosaic Studio Python API v3 (Isometric Manual + Abstract Frame + Overlapping Layers) is running"}
+    return {"status": "REGO Mosaic Studio Python API v3 (Demo + Isometric Manual + 3D Layers) is running"}
+
+
+@app.get("/api/demo-image")
+def get_demo_image():
+    """Returns the built-in RE-GO demo PNG so the frontend can load it with 1 click."""
+    demo_path = os.path.join(ORDERS_DIR, "builtin_demo.png")
+    create_demo_image(demo_path)
+    return FileResponse(demo_path, media_type="image/png", filename="rego_demo.png")
 
 
 @app.post("/api/generate")
 async def create_mosaic(
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(default=None),
     preset: str = Form("auto"),
     stud_ratio: float = Form(0.45),
     merge_tolerance: float = Form(2.2),
     z_layers: int = Form(1),
     z_mode: str = Form("luminance"),
     abstract_mode: bool = Form(False),
+    use_demo: bool = Form(False),
 ):
-    file_bytes = await file.read()
     safe_z = max(1, min(4, int(z_layers)))
+
+    if use_demo or file is None:
+        demo_tmp = os.path.join(ORDERS_DIR, "builtin_demo.png")
+        create_demo_image(demo_tmp)
+        with open(demo_tmp, "rb") as df:
+            file_bytes = df.read()
+    else:
+        file_bytes = await file.read()
+
     sig = (
         file_bytes[:4096]
         + str(len(file_bytes)).encode()

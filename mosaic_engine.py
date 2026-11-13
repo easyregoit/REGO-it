@@ -312,7 +312,8 @@ def detect_boxed_grooves_and_preserve_lines(
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Detects thin dark outlines and letter borders (like 'RE-GO') at 512x512 BEFORE
-    downsampling so letter strokes stay 1-stud wide and never wash out.
+    downsampling and applies 1-Stud Non-Maximum Suppression (NMS) so outlines are
+    strictly 1 stud wide and never eat into the interior of letters.
     """
     gh, gw = grid_size
     factor = max(2, 512 // max(gh, gw))
@@ -323,20 +324,26 @@ def detect_boxed_grooves_and_preserve_lines(
 
     gray_u8 = np.clip(hi_gray * 255.0, 0, 255).astype(np.uint8)
     dilated_u8 = np.asarray(
-        Image.fromarray(gray_u8, mode="L").filter(ImageFilter.MaxFilter(size=3)),
+        Image.fromarray(gray_u8, mode="L").filter(ImageFilter.MaxFilter(size=5)),
         dtype=np.float32
     )
     valley_hi = (dilated_u8 - gray_u8.astype(np.float32)) / 255.0
 
     valley_blocks = valley_hi.reshape(gh, factor, gw, factor)
-    # Require the stroke to pass near the center of the stud cell so outlines stay 1-stud thin
-    center_slice = slice(factor // 4, max(factor // 4 + 1, (factor * 3) // 4))
-    center_valley = np.max(valley_blocks[:, center_slice, :, center_slice], axis=(1, 3))
+    c0 = max(0, factor // 4)
+    c1 = max(c0 + 1, (factor * 3) // 4)
+    raw_grid_valley = np.max(valley_blocks[:, c0:c1, :, c0:c1], axis=(1, 3))
 
-    active_valleys = center_valley[center_valley > 0.04]
-    dyn_thresh = float(np.quantile(active_valleys, 0.62)) if len(active_valleys) > 0 else 0.09
-    groove_thresh = max(0.08, min(0.15, dyn_thresh))
-    groove_mask = center_valley >= groove_thresh
+    # 1-Stud Non-Maximum Suppression (NMS): keep only the single sharpest stud along any stroke
+    pad_v = np.pad(raw_grid_valley, 1, mode="constant", constant_values=0.0)
+    vert_peak = (raw_grid_valley >= pad_v[1:-1, :-2]) & (raw_grid_valley > pad_v[1:-1, 2:])
+    horiz_peak = (raw_grid_valley >= pad_v[:-2, 1:-1]) & (raw_grid_valley > pad_v[2:, 1:-1])
+    nms_valley = np.where(vert_peak | horiz_peak, raw_grid_valley, 0.0)
+
+    active_valleys = nms_valley[nms_valley > 0.05]
+    dyn_thresh = float(np.quantile(active_valleys, 0.45)) if len(active_valleys) > 0 else 0.09
+    groove_thresh = max(0.085, min(0.15, dyn_thresh))
+    groove_mask = nms_valley >= groove_thresh
 
     rgb_blocks = hi_rgb.reshape(gh, factor, gw, factor, 3).transpose(0, 2, 1, 3, 4).reshape(gh, gw, factor * factor, 3)
     luma_blocks = 0.2126 * rgb_blocks[..., 0] + 0.7152 * rgb_blocks[..., 1] + 0.0722 * rgb_blocks[..., 2]
@@ -358,9 +365,10 @@ def compute_stable_terrace_z_grid(
     groove_mask: np.ndarray | None = None
 ) -> np.ndarray:
     """
-    Crisp Lettering & Subject 3D Layer Allocator:
-    - Layer 1: Outer background AND carved letter outlines (`groove_mask`).
-    - Layer z_layers (Top): Raised subject body and boxed letter faces ('RE-GO').
+    3-Level Terraced Subject & Lettering Allocator:
+    - Layer 1: Flat outer background (plus full structural foundation under the subject).
+    - Layer z_layers - 1 (e.g. Z=2): Recessed 1-stud letter outlines (`groove_mask`) and side walls.
+    - Layer z_layers (e.g. Z=3): Raised letter faces ('RE-GO') and main foreground relief.
     """
     h, w = grid_size
     if z_layers <= 1:
@@ -397,12 +405,14 @@ def compute_stable_terrace_z_grid(
     if not np.any(is_subject):
         return z_grid
 
-    # Elevate the subject and letter faces to the top plateau
+    # Elevate the subject and letter faces to the top plateau (e.g. Z=3)
     z_grid[is_subject] = z_layers
 
-    # Carve letter outlines and internal box grooves down to Z=1 so letters stand out clearly
+    # Recess the 1-stud letter outlines to Z = max(1, z_layers - 1) (e.g. Z=2)
+    # so they sit on the solid Z=1 gray structural foundation while carving out the Z=3 letters!
+    recess_z = max(1, z_layers - 1)
     if groove_mask is not None:
-        z_grid[is_subject & groove_mask] = 1
+        z_grid[is_subject & groove_mask] = recess_z
 
     return z_grid
 
@@ -418,6 +428,12 @@ def build_interlocking_layers(
     groove_mask: np.ndarray | None = None,
     filler_color_id: int = 86
 ) -> tuple[list[dict], list[dict]]:
+    """
+    Packs the mosaic strictly layer-by-layer (Z=1..max_z) with 90-degree alternating
+    cross-seam interlocking for rock-solid physical stability.
+    Uses 3-plate-tall filler bricks only under Z=4 plateaus so Z=1..3 builds always
+    have cross-interlocked plates and 8 progressive manual steps.
+    """
     h, w = nearest_indices.shape
     max_z = int(np.max(z_grid))
     filler_idx = next((idx for idx, (cid, _) in enumerate(palette_keys) if cid == filler_color_id), 0)
@@ -452,8 +468,8 @@ def build_interlocking_layers(
     seam_grids = np.zeros((max_z + 1, h, w), dtype=np.int32)
     uid = 1
 
-    # PASS 0: 3-Plate = 1-Brick Vertical Substitution (when max_z >= 3)
-    if max_z >= 3:
+    # Optional 3-plate = 1-brick substitution ONLY for deep under-cores where z_grid >= 4
+    if max_z >= 4:
         brick_under_mask = (z_grid >= 4)
         bu_visited = ~brick_under_mask
         for r in range(h):
@@ -486,46 +502,7 @@ def build_interlocking_layers(
                     "is_structural": True,
                 })
 
-        no_groove = (~groove_mask) if groove_mask is not None else np.ones((h, w), dtype=bool)
-        surf_brick_mask = (z_grid == 3) & stud_mask & no_groove & (~occupied[3])
-        sb_visited = ~surf_brick_mask
-        for r in range(h):
-            for c in range(w):
-                if sb_visited[r, c]:
-                    continue
-                color_idx = int(nearest_indices[r, c])
-                color_id = palette_keys[color_idx][0]
-                best_shape = (1, 1, "plate_1x1")
-                for sh, sw, p_key in horiz_First:
-                    b_key = PLATE_TO_BRICK_KEY[p_key]
-                    if not is_part_available(b_key, color_id):
-                        continue
-                    if r + sh <= h and c + sw <= w:
-                        if (not np.any(sb_visited[r:r + sh, c:c + sw])
-                                and np.all(nearest_indices[r:r + sh, c:c + sw] == color_idx)):
-                            best_shape = (sh, sw, p_key)
-                            break
-                sh, sw, p_key = best_shape
-                b_key = PLATE_TO_BRICK_KEY[p_key]
-                if not is_part_available(b_key, color_id):
-                    continue
-                sb_visited[r:r + sh, c:c + sw] = True
-                occupied[1:4, r:r + sh, c:c + sw] = True
-                uid += 1
-                seam_grids[3, r:r + sh, c:c + sw] = uid
-                surface_placements.append({
-                    "r": r, "c": c, "h": sh, "w": sw,
-                    "z": 3, "z_span": 3,
-                    "color_idx": color_idx,
-                    "bg_color_idx": color_idx,
-                    "part_key": b_key,
-                    "is_stud": True,
-                    "shape": "rect",
-                    "orient": None,
-                    "is_structural": False,
-                })
-
-    # PASS 1..MAX_Z: Pack remaining plates & flat tiles with 90° cross-seam interlocking
+    # Pack Layers Z = 1..max_z with 90-degree alternating cross-seam interlocking
     for lz in range(1, max_z + 1):
         prev_seam_grid = seam_grids[lz - 1]
         curr_seam_grid = seam_grids[lz].copy()
@@ -533,6 +510,7 @@ def build_interlocking_layers(
         plate_order = horiz_First if odd_layer else vert_First
         tile_order = horiz_Tiles if odd_layer else vert_Tiles
 
+        # 1. Structural Light Bluish Gray (#86) under-plates for all cells where z_grid > lz
         struct_visited = (~(z_grid > lz)) | occupied[lz]
         for r in range(h):
             for c in range(w):
@@ -568,16 +546,16 @@ def build_interlocking_layers(
                     "is_structural": True,
                 })
 
+        # 2. Visible surface plates & flat tiles for cells where z_grid == lz
         surf_visited = (~(z_grid == lz)) | occupied[lz]
         for r in range(h):
             for c in range(w):
                 if surf_visited[r, c]:
                     continue
-                if groove_mask is not None and groove_mask[r, c]:
-                    continue
                 color_idx = int(nearest_indices[r, c])
                 color_id = palette_keys[color_idx][0]
                 is_stud = bool(stud_mask[r, c])
+                is_grv = bool(groove_mask[r, c]) if groove_mask is not None else False
                 shapes = plate_order if is_stud else tile_order
 
                 best_candidate = None
@@ -585,13 +563,16 @@ def build_interlocking_layers(
                 for sh, sw, part_key in shapes:
                     if not is_part_available(part_key, color_id):
                         continue
+                    # Allow straight 1xN tiles along 1-stud grooves, and 2xN/1xN on non-groove surfaces
+                    if is_grv and min(sh, sw) > 1:
+                        continue
                     if r + sh <= h and c + sw <= w:
                         reg_vis = surf_visited[r:r + sh, c:c + sw]
                         reg_col = nearest_indices[r:r + sh, c:c + sw]
                         reg_stud = stud_mask[r:r + sh, c:c + sw]
-                        reg_grv = groove_mask[r:r + sh, c:c + sw] if groove_mask is not None else False
+                        reg_grv = (groove_mask[r:r + sh, c:c + sw] == is_grv) if groove_mask is not None else True
                         if (not np.any(reg_vis)
-                                and not np.any(reg_grv)
+                                and np.all(reg_grv)
                                 and np.all(reg_col == color_idx)
                                 and np.all(reg_stud == is_stud)):
                             bridged = len(np.unique(prev_seam_grid[r:r + sh, c:c + sw])) if lz > 1 else 1
@@ -620,6 +601,7 @@ def build_interlocking_layers(
                         "is_structural": False,
                     })
 
+        # 3. Remaining 1x1 detail & contour groove cells on Layer lz
         for r in range(h):
             for c in range(w):
                 if surf_visited[r, c]:
@@ -684,75 +666,62 @@ def render_mixed_mosaic(
     grid_size: tuple[int, int],
     target_output_px: int = 2400
 ) -> Image.Image:
+    """
+    Renders the top-down HD mosaic without parallax-shifting elevated bricks over
+    adjacent 1-stud letter grooves, so every 1-stud contour line stays 100% visible.
+    """
     h, w = grid_size
     scale_factor = max(20, target_output_px // max(h, w))
     baseplate_rgb = (24, 28, 34)
     canvas = Image.new("RGB", (w * scale_factor, h * scale_factor), baseplate_rgb)
     draw = ImageDraw.Draw(canvas)
-    bevel_w = max(1, scale_factor // 15)
-    z_step_px = max(1, scale_factor // 16)
+    bevel_w = max(1, scale_factor // 14)
 
     max_z = max((p.get("z", 1) for p in placements), default=1)
     sorted_placements = sorted(placements, key=lambda item: (item.get("z", 1), item["r"], item["c"]))
 
     for p in sorted_placements:
         z = p.get("z", 1)
-        elev_offset = (z - 1) * z_step_px
-
-        raw_x0 = p["c"] * scale_factor
-        raw_y0 = p["r"] * scale_factor
-        raw_x1 = (p["c"] + p["w"]) * scale_factor - 1
-        raw_y1 = (p["r"] + p["h"]) * scale_factor - 1
+        x0 = p["c"] * scale_factor
+        y0 = p["r"] * scale_factor
+        x1 = (p["c"] + p["w"]) * scale_factor - 1
+        y1 = (p["r"] + p["h"]) * scale_factor - 1
 
         base_color = tuple(int(v) for v in palette_rgb[p["color_idx"]])
         bg_color = tuple(int(v) for v in palette_rgb[p["bg_color_idx"]])
 
-        z_boost = (z - max_z) * 10 if max_z > 1 else 0
+        # Depth shading: raised top layer is brightest; recessed grooves/layers are shaded deeper
+        z_boost = (z - max_z) * 14 if max_z > 1 else 0
         face_color = clamp_rgb(base_color, z_boost)
-        highlight = clamp_rgb(face_color, 36)
-        shadow = clamp_rgb(face_color, -42)
-        wall_color = clamp_rgb(base_color, -52)
-        seam = clamp_rgb(base_color, -68)
-
-        if z > 1:
-            sh_pad = max(2, elev_offset + 1)
-            draw.rectangle(
-                [raw_x0 + sh_pad, raw_y0 + sh_pad,
-                 min(w * scale_factor - 1, raw_x1 + sh_pad),
-                 min(h * scale_factor - 1, raw_y1 + sh_pad)],
-                fill=clamp_rgb(base_color, -85)
-            )
-            draw.rectangle([raw_x0, raw_y0, raw_x1, raw_y1], fill=wall_color, outline=seam, width=1)
-
-        x0 = max(0, raw_x0 - elev_offset)
-        y0 = max(0, raw_y0 - elev_offset)
-        x1 = max(x0 + 4, raw_x1 - elev_offset)
-        y1 = max(y0 + 4, raw_y1 - elev_offset)
+        highlight = clamp_rgb(face_color, 38 if z == max_z else 20)
+        shadow = clamp_rgb(face_color, -45)
+        seam = clamp_rgb(base_color, -72)
         shape = p["shape"]
 
         if shape == "qtr_1x1":
             draw_quarter_tile(draw, x0, y0, x1, y1, face_color, bg_color, p["orient"], seam)
         elif shape in ("round_1x1", "round_2x2"):
-            draw.rectangle([x0, y0, x1, y1], fill=wall_color, outline=seam, width=1)
+            draw.rectangle([x0, y0, x1, y1], fill=shadow, outline=seam, width=1)
             pad = max(1, scale_factor // 10)
             draw.ellipse([x0 + pad, y0 + pad, x1 - pad, y1 - pad], fill=face_color, outline=seam, width=1)
             draw.arc([x0 + pad + 1, y0 + pad + 1, x1 - pad - 1, y1 - pad - 1],
                      start=200, end=330, fill=highlight, width=bevel_w)
         else:
+            b_thick = bevel_w + (1 if z == max_z and max_z > 1 else 0)
             draw.rectangle([x0, y0, x1, y1], fill=face_color, outline=seam, width=1)
-            draw.line([(x0 + 1, y0 + 1), (x1 - 1, y0 + 1)], fill=highlight, width=bevel_w)
-            draw.line([(x0 + 1, y0 + 1), (x0 + 1, y1 - 1)], fill=highlight, width=bevel_w)
-            draw.line([(x0 + 1, y1 - 1), (x1 - 1, y1 - 1)], fill=shadow, width=bevel_w)
-            draw.line([(x1 - 1, y0 + 1), (x1 - 1, y1 - 1)], fill=shadow, width=bevel_w)
+            draw.line([(x0 + 1, y0 + 1), (x1 - 1, y0 + 1)], fill=highlight, width=b_thick)
+            draw.line([(x0 + 1, y0 + 1), (x0 + 1, y1 - 1)], fill=highlight, width=b_thick)
+            draw.line([(x0 + 1, y1 - 1), (x1 - 1, y1 - 1)], fill=shadow, width=b_thick)
+            draw.line([(x1 - 1, y0 + 1), (x1 - 1, y1 - 1)], fill=shadow, width=b_thick)
 
         if p["is_stud"]:
             margin = max(3, int(scale_factor * 0.22))
             for sr in range(p["h"]):
                 for sc in range(p["w"]):
-                    cx0 = max(0, (p["c"] + sc) * scale_factor + margin - elev_offset)
-                    cy0 = max(0, (p["r"] + sr) * scale_factor + margin - elev_offset)
-                    cx1 = max(cx0 + 2, (p["c"] + sc + 1) * scale_factor - 1 - margin - elev_offset)
-                    cy1 = max(cy0 + 2, (p["r"] + sr + 1) * scale_factor - 1 - margin - elev_offset)
+                    cx0 = (p["c"] + sc) * scale_factor + margin
+                    cy0 = (p["r"] + sr) * scale_factor + margin
+                    cx1 = (p["c"] + sc + 1) * scale_factor - 1 - margin
+                    cy1 = (p["r"] + sr + 1) * scale_factor - 1 - margin
                     draw.ellipse([cx0 + 1, cy0 + 2, cx1 + 1, cy1 + 2], fill=shadow)
                     draw.ellipse([cx0, cy0, cx1, cy1], fill=face_color, outline=shadow, width=1)
                     draw.arc([cx0 + 1, cy0 + 1, cx1 - 1, cy1 - 1],
@@ -871,7 +840,10 @@ def generate_isometric_manual(
     grid_size: tuple[int, int],
     output_manual_path: str
 ) -> str:
-    """100% Wordless LEGO-Style Isometric Instruction Manual ('1x', '2x', '3x' only)."""
+    """
+    100% Wordless 8-Step LEGO-Style Isometric Instruction Manual ('1x', '2x', '3x' only):
+    - Splits layers strictly bottom-to-top (Z=1 -> Z=2 -> Z=3) into 8 balanced steps.
+    """
     h, w = grid_size
     all_placements = under_placements + surface_placements
     max_z = max((p.get("z", 1) for p in all_placements), default=1)
@@ -880,14 +852,25 @@ def generate_isometric_manual(
     font_step = _get_manual_font(28)
     font_small = _get_manual_font(13)
 
+    # Group strictly by layer Z (1..max_z) and split into 8 total steps across the layers
     raw_batches: list[list[dict]] = []
-    for base_z in range(1, max_z + 1):
-        layer_pcs = [p for p in all_placements if (p.get("z", 1) - p.get("z_span", 1) + 1) == base_z]
+    if max_z == 1:
+        splits_per_layer = {1: 8}
+    elif max_z == 2:
+        splits_per_layer = {1: 4, 2: 4}
+    elif max_z == 3:
+        splits_per_layer = {1: 2, 2: 3, 3: 3}
+    else:
+        splits_per_layer = {lz: 2 for lz in range(1, max_z + 1)}
+
+    for lz in range(1, max_z + 1):
+        layer_pcs = [p for p in all_placements if p.get("z", 1) == lz]
         if not layer_pcs:
             continue
-        layer_pcs.sort(key=lambda p: (p["r"] + p["c"], p["r"], p["c"]))
+        # Sort structural under-plates first, then back-to-front along isometric diagonal (r + c)
+        layer_pcs.sort(key=lambda p: (0 if p.get("is_structural", False) else 1, p["r"] + p["c"], p["r"], p["c"]))
 
-        num_splits = 4 if max_z <= 2 else 2
+        num_splits = splits_per_layer.get(lz, 2)
         chunk_size = max(1, (len(layer_pcs) + num_splits - 1) // num_splits)
         for s_idx in range(0, len(layer_pcs), chunk_size):
             raw_batches.append(layer_pcs[s_idx:s_idx + chunk_size])
@@ -968,7 +951,7 @@ def generate_isometric_manual(
         combined = [(False, p) for p in prior_pcs] + [(True, p) for p in active_pcs]
         combined.sort(
             key=lambda item: (
-                item[1].get("z", 1) - item[1].get("z_span", 1),
+                item[1].get("z", 1),
                 item[1]["r"] + item[1]["c"],
                 item[1]["r"],
                 item[1]["c"]
@@ -1237,13 +1220,13 @@ def generate_brick_mosaic(
     )
     raw_indices = np.argmin(delta_e, axis=-1)
 
-    # Force groove / letter outline cells to pick a genuinely darker contrasting brick color (e.g. Dark Red #59 or Black #11)
+    # Keep non-groove subject body uniform where shading slightly darkened the red brick face,
+    # while snapping 1-stud groove cells to a contrasting darker color (Dark Red #59 or Black #11)
     dark_sub_lab = rgb2lab_numpy(dark_sub_rgb)
     dark_de = delta_e_ciede2000_numpy(
         dark_sub_lab[:, :, np.newaxis, :],
         palette_lab[np.newaxis, np.newaxis, :, :]
     )
-    # Penalize palette colors that are not at least 12 L* points darker than the surrounding surface color
     surface_L = palette_lab[raw_indices, 0][..., np.newaxis]
     cand_L = palette_lab[np.newaxis, np.newaxis, :, 0]
     not_darker_penalty = np.where(cand_L > (surface_L - 12.0), 100.0, 0.0)

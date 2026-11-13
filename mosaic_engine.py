@@ -52,36 +52,45 @@ GRID_PRESETS = {
 # Universal Part IDs (compatible with both BrickLink and BrickOwl XML importers)
 PART_CATALOG = {
     # Full-Height Standard Bricks (1 Brick = 3 Plates Tall)
-    "brick_2x4":       ("3001",  "Brick 2 x 4 (3-Plate Tall)"),
-    "brick_2x3":       ("3002",  "Brick 2 x 3 (3-Plate Tall)"),
-    "brick_2x2":       ("3003",  "Brick 2 x 2 (3-Plate Tall)"),
-    "brick_1x4":       ("3010",  "Brick 1 x 4 (3-Plate Tall)"),
-    "brick_1x3":       ("3622",  "Brick 1 x 3 (3-Plate Tall)"),
-    "brick_1x2":       ("3004",  "Brick 1 x 2 (3-Plate Tall)"),
-    "brick_1x1":       ("3005",  "Brick 1 x 1 (3-Plate Tall)"),
+    "brick_2x4":        ("3001",  "Brick 2 x 4 (3-Plate Tall)"),
+    "brick_2x3":        ("3002",  "Brick 2 x 3 (3-Plate Tall)"),
+    "brick_2x2":        ("3003",  "Brick 2 x 2 (3-Plate Tall)"),
+    "brick_1x4":        ("3010",  "Brick 1 x 4 (3-Plate Tall)"),
+    "brick_1x3":        ("3622",  "Brick 1 x 3 (3-Plate Tall)"),
+    "brick_1x2":        ("3004",  "Brick 1 x 2 (3-Plate Tall)"),
+    "brick_1x1":        ("3005",  "Brick 1 x 1 (3-Plate Tall)"),
+
+    # Sculpted 3D Slopes, Curved Slopes, Triangular Tiles & Wedge Plates
+    "tile_tri_2x2":     ("35787", "Tile, Modified 2 x 2 Triangular (45° Diagonal)"),
+    "wedge_2x2_left":   ("24299", "Wedge, Plate 2 x 2 Left (Angled Studded)"),
+    "wedge_2x2_right":  ("24307", "Wedge, Plate 2 x 2 Right (Angled Studded)"),
+    "slope_1x1":        ("54200", "Slope 30 1 x 1 x 2/3 (Cheese Slope)"),
+    "slope_1x2":        ("85984", "Slope 30 1 x 2 x 2/3 (Pitched Ramp)"),
+    "slope_curved_2x1": ("11477", "Slope, Curved 2 x 1 x 2/3 (Smooth Curve)"),
+    "tile_macaroni_2x2":("27925", "Tile, Round Corner 2 x 2 Macaroni"),
 
     # Rectangular Studded Plates (1 Plate Tall)
-    "plate_2x4":       ("3020",  "Plate 2 x 4 (Studded)"),
-    "plate_2x3":       ("3021",  "Plate 2 x 3 (Studded)"),
-    "plate_2x2":       ("3022",  "Plate 2 x 2 (Studded)"),
-    "plate_1x4":       ("3710",  "Plate 1 x 4 (Studded)"),
-    "plate_1x3":       ("3623",  "Plate 1 x 3 (Studded)"),
-    "plate_1x2":       ("3023",  "Plate 1 x 2 (Studded)"),
-    "plate_1x1":       ("3024",  "Plate 1 x 1 Square (Studded)"),
-    "plate_round_1x1": ("4073",  "Plate 1 x 1 Round (Studded)"),
+    "plate_2x4":        ("3020",  "Plate 2 x 4 (Studded)"),
+    "plate_2x3":        ("3021",  "Plate 2 x 3 (Studded)"),
+    "plate_2x2":        ("3022",  "Plate 2 x 2 (Studded)"),
+    "plate_1x4":        ("3710",  "Plate 1 x 4 (Studded)"),
+    "plate_1x3":        ("3623",  "Plate 1 x 3 (Studded)"),
+    "plate_1x2":        ("3023",  "Plate 1 x 2 (Studded)"),
+    "plate_1x1":        ("3024",  "Plate 1 x 1 Square (Studded)"),
+    "plate_round_1x1":  ("4073",  "Plate 1 x 1 Round (Studded)"),
 
     # Rectangular Smooth Flat Tiles (1 Plate Tall, Smooth Top)
-    "tile_2x4":        ("87079", "Tile 2 x 4 (Flat)"),
-    "tile_2x2":        ("3068",  "Tile 2 x 2 (Flat)"),
-    "tile_1x4":        ("2431",  "Tile 1 x 4 (Flat)"),
-    "tile_1x3":        ("63864", "Tile 1 x 3 (Flat)"),
-    "tile_1x2":        ("3069",  "Tile 1 x 2 (Flat)"),
-    "tile_1x1":        ("3070",  "Tile 1 x 1 Square (Flat)"),
-    "tile_round_1x1":  ("98138", "Tile 1 x 1 Round (Flat)"),
-    "tile_round_2x2":  ("14769", "Tile 2 x 2 Round (Flat)"),
+    "tile_2x4":         ("87079", "Tile 2 x 4 (Flat)"),
+    "tile_2x2":         ("3068",  "Tile 2 x 2 (Flat)"),
+    "tile_1x4":         ("2431",  "Tile 1 x 4 (Flat)"),
+    "tile_1x3":         ("63864", "Tile 1 x 3 (Flat)"),
+    "tile_1x2":         ("3069",  "Tile 1 x 2 (Flat)"),
+    "tile_1x1":         ("3070",  "Tile 1 x 1 Square (Flat)"),
+    "tile_round_1x1":   ("98138", "Tile 1 x 1 Round (Flat)"),
+    "tile_round_2x2":   ("14769", "Tile 2 x 2 Round (Flat)"),
 
-    # Curved / Diagonal Accuracy Tiles
-    "tile_qtr_1x1":    ("25269", "Tile 1 x 1 Quarter Circle (Curved)"),
+    # Curved / Diagonal 1x1 Accuracy Tiles
+    "tile_qtr_1x1":     ("25269", "Tile 1 x 1 Quarter Circle (Curved)"),
 }
 
 PLATE_TO_BRICK_KEY = {
@@ -95,12 +104,19 @@ PLATE_TO_BRICK_KEY = {
 }
 
 PART_COLOR_WHITELIST = {
-    "tile_qtr_1x1":    {1, 2, 3, 4, 5, 6, 7, 11, 34, 42, 48, 59, 63, 69, 71, 80, 85, 86, 88, 89, 90, 104, 105, 110, 150, 153, 155, 156},
-    "tile_round_2x2":  {1, 2, 3, 4, 5, 6, 7, 11, 34, 42, 59, 63, 69, 85, 86, 88, 90, 110, 150, 156},
-    "tile_2x4":        {1, 2, 3, 4, 5, 6, 7, 11, 34, 36, 42, 48, 55, 59, 63, 69, 71, 80, 85, 86, 88, 89, 90, 104, 105, 110, 120, 150, 153, 155, 156},
-    "tile_1x3":        {1, 2, 3, 4, 5, 6, 7, 11, 34, 36, 42, 48, 55, 59, 63, 69, 71, 80, 85, 86, 88, 89, 90, 104, 105, 110, 120, 150, 153, 155, 156},
-    "tile_round_1x1":  {1, 2, 3, 4, 5, 6, 7, 11, 34, 36, 42, 48, 55, 59, 63, 69, 71, 80, 85, 86, 88, 89, 90, 104, 105, 110, 120, 150, 153, 155, 156},
-    "plate_round_1x1": {1, 2, 3, 4, 5, 6, 7, 11, 34, 36, 42, 48, 55, 59, 63, 69, 71, 80, 85, 86, 88, 89, 90, 104, 105, 110, 120, 150, 153, 155, 156},
+    "tile_tri_2x2":      {1, 2, 3, 4, 5, 6, 7, 11, 34, 42, 59, 63, 69, 85, 86, 88, 90, 110, 150, 155, 156},
+    "wedge_2x2_left":    {1, 2, 3, 4, 5, 6, 7, 11, 34, 42, 48, 55, 59, 63, 69, 80, 85, 86, 88, 110, 120, 155},
+    "wedge_2x2_right":   {1, 2, 3, 4, 5, 6, 7, 11, 34, 42, 48, 55, 59, 63, 69, 80, 85, 86, 88, 110, 120, 155},
+    "slope_1x1":         {1, 2, 3, 4, 5, 6, 7, 11, 34, 36, 42, 48, 55, 59, 63, 69, 71, 80, 85, 86, 88, 89, 90, 104, 105, 110, 120, 150, 153, 155, 156},
+    "slope_1x2":         {1, 2, 3, 4, 5, 6, 7, 11, 34, 36, 42, 48, 55, 59, 63, 69, 71, 80, 85, 86, 88, 89, 90, 104, 105, 110, 120, 150, 153, 155, 156},
+    "slope_curved_2x1":  {1, 2, 3, 4, 5, 6, 7, 11, 34, 36, 42, 48, 55, 59, 63, 69, 71, 80, 85, 86, 88, 89, 90, 104, 105, 110, 120, 150, 153, 155, 156},
+    "tile_macaroni_2x2": {1, 2, 3, 4, 5, 6, 7, 11, 34, 42, 48, 59, 63, 69, 71, 85, 86, 88, 90, 104, 105, 110, 150, 156},
+    "tile_qtr_1x1":      {1, 2, 3, 4, 5, 6, 7, 11, 34, 42, 48, 59, 63, 69, 71, 80, 85, 86, 88, 89, 90, 104, 105, 110, 150, 153, 155, 156},
+    "tile_round_2x2":    {1, 2, 3, 4, 5, 6, 7, 11, 34, 42, 59, 63, 69, 85, 86, 88, 90, 110, 150, 156},
+    "tile_2x4":          {1, 2, 3, 4, 5, 6, 7, 11, 34, 36, 42, 48, 55, 59, 63, 69, 71, 80, 85, 86, 88, 89, 90, 104, 105, 110, 120, 150, 153, 155, 156},
+    "tile_1x3":          {1, 2, 3, 4, 5, 6, 7, 11, 34, 36, 42, 48, 55, 59, 63, 69, 71, 80, 85, 86, 88, 89, 90, 104, 105, 110, 120, 150, 153, 155, 156},
+    "tile_round_1x1":    {1, 2, 3, 4, 5, 6, 7, 11, 34, 36, 42, 48, 55, 59, 63, 69, 71, 80, 85, 86, 88, 89, 90, 104, 105, 110, 120, 150, 153, 155, 156},
+    "plate_round_1x1":   {1, 2, 3, 4, 5, 6, 7, 11, 34, 36, 42, 48, 55, 59, 63, 69, 71, 80, 85, 86, 88, 89, 90, 104, 105, 110, 120, 150, 153, 155, 156},
 }
 
 
@@ -210,6 +226,46 @@ def detect_subpixel_orientation(
     return best_orient, solid_fg_err - float(best_err)
 
 
+def detect_2x2_diagonal_corner(
+    nearest_indices: np.ndarray,
+    z_grid: np.ndarray,
+    groove_mask: np.ndarray | None,
+    r: int,
+    c: int,
+    lz: int
+) -> tuple[str, int, int] | None:
+    """
+    Detects when a 2x2 stud block forms a 3-vs-1 diagonal corner (L-tromino of one color
+    and 1 corner of a contrasting neighbor color), allowing a 2x2 Triangular Tile (#35787),
+    Wedge Plate (#24299/#24307), or 2x2 Macaroni Corner (#27925) to smooth the staircase!
+    Returns (orient, fg_color_idx, bg_color_idx) where orient in {'TL', 'TR', 'BL', 'BR'}
+    indicates which 3 corners belong to the foreground triangle.
+    """
+    if groove_mask is not None and np.any(groove_mask[r:r + 2, c:c + 2]):
+        return None
+    if not np.all(z_grid[r:r + 2, c:c + 2] == lz):
+        return None
+
+    block = nearest_indices[r:r + 2, c:c + 2]
+    vals, counts = np.unique(block, return_counts=True)
+    if len(vals) != 2 or not (3 in counts and 1 in counts):
+        return None
+
+    fg_col = int(vals[np.argmax(counts)])
+    bg_col = int(vals[np.argmin(counts)])
+
+    # Identify which single corner is the background pixel (opposite of the filled triangle)
+    if block[1, 1] == bg_col:
+        return ("TL", fg_col, bg_col)
+    if block[1, 0] == bg_col:
+        return ("TR", fg_col, bg_col)
+    if block[0, 1] == bg_col:
+        return ("BL", fg_col, bg_col)
+    if block[0, 0] == bg_col:
+        return ("BR", fg_col, bg_col)
+    return None
+
+
 def draw_quarter_tile(
     draw: ImageDraw.ImageDraw,
     x0: int, y0: int, x1: int, y1: int,
@@ -235,11 +291,100 @@ def draw_quarter_tile(
         draw.pieslice(bbox, start=0, end=90, fill=fg_color, outline=seam)
 
 
+def draw_triangular_2x2(
+    draw: ImageDraw.ImageDraw,
+    x0: int, y0: int, x1: int, y1: int,
+    fg_color: tuple[int, int, int],
+    bg_color: tuple[int, int, int],
+    orient: str,
+    seam: tuple[int, int, int],
+    highlight: tuple[int, int, int],
+    shadow: tuple[int, int, int],
+    bevel_w: int = 2
+):
+    """
+    Renders Part #35787 (2x2 Triangular Tile) or #24299/#24307 (2x2 Wedge Plate)
+    with a crisp 45-degree diagonal cut over the background color.
+    """
+    # Draw underlying background corner first
+    draw.rectangle([x0, y0, x1, y1], fill=bg_color, outline=seam, width=1)
+    xm = (x0 + x1) // 2
+    ym = (y0 + y1) // 2
+    draw.line([(xm, y0), (xm, y1)], fill=clamp_rgb(bg_color, -45), width=1)
+    draw.line([(x0, ym), (x1, ym)], fill=clamp_rgb(bg_color, -45), width=1)
+
+    if orient == "TL":
+        pts = [(x0, y0), (x1, y0), (x0, y1)]
+    elif orient == "TR":
+        pts = [(x0, y0), (x1, y0), (x1, y1)]
+    elif orient == "BL":
+        pts = [(x0, y0), (x1, y1), (x0, y1)]
+    else:  # "BR"
+        pts = [(x1, y0), (x1, y1), (x0, y1)]
+
+    draw.polygon(pts, fill=fg_color, outline=seam)
+    draw.line(pts + [pts[0]], fill=seam, width=max(1, bevel_w))
+    draw.line([pts[0], pts[1]], fill=highlight, width=bevel_w)
+    draw.line([pts[1], pts[2]], fill=shadow, width=bevel_w)
+
+
+def draw_slope_piece(
+    draw: ImageDraw.ImageDraw,
+    x0: int, y0: int, x1: int, y1: int,
+    face_color: tuple[int, int, int],
+    orient: str,
+    seam: tuple[int, int, int],
+    is_curved: bool = False
+):
+    """
+    Renders 3D Pitched Cheese Slopes (#54200 1x1, #85984 1x2) and Curved Slopes (#11477 2x1)
+    with a high ridge and directional angled ramp shading ('N', 'S', 'E', 'W').
+    """
+    ridge_col = clamp_rgb(face_color, 42)
+    upper_ramp = clamp_rgb(face_color, 14)
+    lower_ramp = clamp_rgb(face_color, -32)
+    toe_shadow = clamp_rgb(face_color, -56)
+
+    draw.rectangle([x0, y0, x1, y1], fill=upper_ramp, outline=seam, width=1)
+    w = max(4, x1 - x0)
+    h = max(4, y1 - y0)
+
+    if orient == "N":  # High ridge at bottom (South), slopes down toward top (North)
+        ridge_y = y1 - max(2, h // 4)
+        mid_y = (y0 + ridge_y) // 2
+        draw.rectangle([x0 + 1, y0 + 1, x1 - 1, mid_y], fill=lower_ramp)
+        draw.rectangle([x0 + 1, ridge_y, x1 - 1, y1 - 1], fill=ridge_col)
+        draw.line([(x0 + 1, ridge_y), (x1 - 1, ridge_y)], fill=seam, width=1)
+        draw.line([(x0 + 1, y0 + 1), (x1 - 1, y0 + 1)], fill=toe_shadow, width=2)
+    elif orient == "S":  # High ridge at top (North), slopes down toward bottom (South)
+        ridge_y = y0 + max(2, h // 4)
+        mid_y = (ridge_y + y1) // 2
+        draw.rectangle([x0 + 1, mid_y, x1 - 1, y1 - 1], fill=lower_ramp)
+        draw.rectangle([x0 + 1, y0 + 1, x1 - 1, ridge_y], fill=ridge_col)
+        draw.line([(x0 + 1, ridge_y), (x1 - 1, ridge_y)], fill=seam, width=1)
+        draw.line([(x0 + 1, y1 - 1), (x1 - 1, y1 - 1)], fill=toe_shadow, width=2)
+    elif orient == "W":  # High ridge at right (East), slopes down toward left (West)
+        ridge_x = x1 - max(2, w // 4)
+        mid_x = (x0 + ridge_x) // 2
+        draw.rectangle([x0 + 1, y0 + 1, mid_x, y1 - 1], fill=lower_ramp)
+        draw.rectangle([ridge_x, y0 + 1, x1 - 1, y1 - 1], fill=ridge_col)
+        draw.line([(ridge_x, y0 + 1), (ridge_x, y1 - 1)], fill=seam, width=1)
+        draw.line([(x0 + 1, y0 + 1), (x0 + 1, y1 - 1)], fill=toe_shadow, width=2)
+    else:  # "E": High ridge at left (West), slopes down toward right (East)
+        ridge_x = x0 + max(2, w // 4)
+        mid_x = (ridge_x + x1) // 2
+        draw.rectangle([mid_x, y0 + 1, x1 - 1, y1 - 1], fill=lower_ramp)
+        draw.rectangle([x0 + 1, y0 + 1, ridge_x, y1 - 1], fill=ridge_col)
+        draw.line([(ridge_x, y0 + 1), (ridge_x, y1 - 1)], fill=seam, width=1)
+        draw.line([(x1 - 1, y0 + 1), (x1 - 1, y1 - 1)], fill=toe_shadow, width=2)
+
+    if is_curved:
+        # Soften the ridge line for Curved Slopes (#11477)
+        cx, cy = (x0 + x1) // 2, (y0 + y1) // 2
+        draw.ellipse([cx - w // 4, cy - h // 4, cx + w // 4, cy + h // 4], fill=upper_ramp)
+
+
 def extract_neural_foreground_mask(img_pil: Image.Image) -> np.ndarray | None:
-    """
-    Isolates the foreground subject by comparing every pixel against the outer
-    border color distribution in CIELAB space (no circular halo).
-    """
     work_img = img_pil.resize((256, 256), Image.Resampling.BILINEAR).convert("RGB")
     rgb_norm = np.asarray(work_img, dtype=np.float32) / 255.0
     lab = rgb2lab_numpy(rgb_norm)
@@ -310,11 +455,6 @@ def detect_boxed_grooves_and_preserve_lines(
     img_cropped: Image.Image,
     grid_size: tuple[int, int]
 ) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Detects thin dark outlines and letter borders (like 'RE-GO') at 512x512 BEFORE
-    downsampling and applies 1-Stud Non-Maximum Suppression (NMS) so outlines are
-    strictly 1 stud wide and never eat into the interior of letters.
-    """
     gh, gw = grid_size
     factor = max(2, 512 // max(gh, gw))
     work_h, work_w = gh * factor, gw * factor
@@ -334,7 +474,6 @@ def detect_boxed_grooves_and_preserve_lines(
     c1 = max(c0 + 1, (factor * 3) // 4)
     raw_grid_valley = np.max(valley_blocks[:, c0:c1, :, c0:c1], axis=(1, 3))
 
-    # 1-Stud Non-Maximum Suppression (NMS): keep only the single sharpest stud along any stroke
     pad_v = np.pad(raw_grid_valley, 1, mode="constant", constant_values=0.0)
     vert_peak = (raw_grid_valley >= pad_v[1:-1, :-2]) & (raw_grid_valley > pad_v[1:-1, 2:])
     horiz_peak = (raw_grid_valley >= pad_v[:-2, 1:-1]) & (raw_grid_valley > pad_v[2:, 1:-1])
@@ -364,12 +503,6 @@ def compute_stable_terrace_z_grid(
     fg_mask_grid: np.ndarray | None = None,
     groove_mask: np.ndarray | None = None
 ) -> np.ndarray:
-    """
-    3-Level Terraced Subject & Lettering Allocator:
-    - Layer 1: Flat outer background (plus full structural foundation under the subject).
-    - Layer z_layers - 1 (e.g. Z=2): Recessed 1-stud letter outlines (`groove_mask`) and side walls.
-    - Layer z_layers (e.g. Z=3): Raised letter faces ('RE-GO') and main foreground relief.
-    """
     h, w = grid_size
     if z_layers <= 1:
         return np.ones((h, w), dtype=np.int32)
@@ -405,11 +538,7 @@ def compute_stable_terrace_z_grid(
     if not np.any(is_subject):
         return z_grid
 
-    # Elevate the subject and letter faces to the top plateau (e.g. Z=3)
     z_grid[is_subject] = z_layers
-
-    # Recess the 1-stud letter outlines to Z = max(1, z_layers - 1) (e.g. Z=2)
-    # so they sit on the solid Z=1 gray structural foundation while carving out the Z=3 letters!
     recess_z = max(1, z_layers - 1)
     if groove_mask is not None:
         z_grid[is_subject & groove_mask] = recess_z
@@ -429,10 +558,14 @@ def build_interlocking_layers(
     filler_color_id: int = 86
 ) -> tuple[list[dict], list[dict]]:
     """
-    Packs the mosaic strictly layer-by-layer (Z=1..max_z) with 90-degree alternating
-    cross-seam interlocking for rock-solid physical stability.
-    Uses 3-plate-tall filler bricks only under Z=4 plateaus so Z=1..3 builds always
-    have cross-interlocked plates and 8 progressive manual steps.
+    Sculpted Slope, Wedge & Multi-Shape Layer Packer:
+    1. Packs structural under-plates on Z < z_grid with 90-degree seam interlocking.
+    2. SCULPTING PASS A (2x2 Triangular Tiles #35787 & Wedge Plates #24299/#24307):
+       Replaces 2x2 diagonal staircase corners with 45-degree triangular tiles or wedge plates
+       BEFORE rectangular packing so silhouettes and angled features never turn blocky.
+    3. SCULPTING PASS B (3D Slopes #85984 1x2, #11477 2x1 Curved, #54200 1x1 Cheese):
+       Places directional 3D slopes along plateau edges and angled boundaries.
+    4. PASS C & D: Packs interior rectangular plates/tiles and 1x1 quarter-circle curves (#25269).
     """
     h, w = nearest_indices.shape
     max_z = int(np.max(z_grid))
@@ -468,7 +601,6 @@ def build_interlocking_layers(
     seam_grids = np.zeros((max_z + 1, h, w), dtype=np.int32)
     uid = 1
 
-    # Optional 3-plate = 1-brick substitution ONLY for deep under-cores where z_grid >= 4
     if max_z >= 4:
         brick_under_mask = (z_grid >= 4)
         bu_visited = ~brick_under_mask
@@ -502,7 +634,6 @@ def build_interlocking_layers(
                     "is_structural": True,
                 })
 
-    # Pack Layers Z = 1..max_z with 90-degree alternating cross-seam interlocking
     for lz in range(1, max_z + 1):
         prev_seam_grid = seam_grids[lz - 1]
         curr_seam_grid = seam_grids[lz].copy()
@@ -510,7 +641,7 @@ def build_interlocking_layers(
         plate_order = horiz_First if odd_layer else vert_First
         tile_order = horiz_Tiles if odd_layer else vert_Tiles
 
-        # 1. Structural Light Bluish Gray (#86) under-plates for all cells where z_grid > lz
+        # 1. Structural Light Bluish Gray (#86) under-plates where z_grid > lz
         struct_visited = (~(z_grid > lz)) | occupied[lz]
         for r in range(h):
             for c in range(w):
@@ -546,8 +677,113 @@ def build_interlocking_layers(
                     "is_structural": True,
                 })
 
-        # 2. Visible surface plates & flat tiles for cells where z_grid == lz
         surf_visited = (~(z_grid == lz)) | occupied[lz]
+
+        # 2A. SCULPTING PASS A: Place 2x2 Triangular Tiles (#35787) & Wedge Plates (#24299/#24307)
+        # along 2x2 diagonal staircase corners BEFORE rectangular packing
+        for r in range(h - 1):
+            for c in range(w - 1):
+                if np.any(surf_visited[r:r + 2, c:c + 2]):
+                    continue
+                diag_hit = detect_2x2_diagonal_corner(nearest_indices, z_grid, groove_mask, r, c, lz)
+                if diag_hit is None:
+                    continue
+                orient, fg_idx, bg_idx = diag_hit
+                fg_cid = palette_keys[fg_idx][0]
+                is_st = bool(np.any(stud_mask[r:r + 2, c:c + 2]))
+
+                if is_st and is_part_available("wedge_2x2_left", fg_cid):
+                    part_key = "wedge_2x2_left" if orient in ("TL", "BR") else "wedge_2x2_right"
+                    shape_type = "wedge_2x2"
+                elif is_part_available("tile_tri_2x2", fg_cid):
+                    part_key = "tile_tri_2x2"
+                    shape_type = "tri_2x2"
+                    is_st = False
+                else:
+                    continue
+
+                surf_visited[r:r + 2, c:c + 2] = True
+                occupied[lz, r:r + 2, c:c + 2] = True
+                uid += 1
+                curr_seam_grid[r:r + 2, c:c + 2] = uid
+                surface_placements.append({
+                    "r": r, "c": c, "h": 2, "w": 2,
+                    "z": lz, "z_span": 1,
+                    "color_idx": fg_idx,
+                    "bg_color_idx": bg_idx,
+                    "part_key": part_key,
+                    "is_stud": is_st,
+                    "shape": shape_type,
+                    "orient": orient,
+                    "is_structural": False,
+                })
+
+        # 2B. SCULPTING PASS B: Place 1x2 Slopes (#85984) & 2x1 Curved Slopes (#11477)
+        # along 3D elevation step-downs so raised borders taper like real sculpted sets
+        if lz > 1:
+            for r in range(h):
+                for c in range(w):
+                    if surf_visited[r, c]:
+                        continue
+                    if groove_mask is not None and groove_mask[r, c]:
+                        continue
+                    color_idx = int(nearest_indices[r, c])
+                    color_id = palette_keys[color_idx][0]
+
+                    # Check if this cell sits on the outer rim of an elevated plateau (adjacent to lower Z)
+                    drop_N = (r > 0 and z_grid[r - 1, c] < lz)
+                    drop_S = (r + 1 < h and z_grid[r + 1, c] < lz)
+                    drop_W = (c > 0 and z_grid[r, c - 1] < lz)
+                    drop_E = (c + 1 < w and z_grid[r, c + 1] < lz)
+
+                    if not (drop_N or drop_S or drop_W or drop_E):
+                        continue
+
+                    slope_dir = "N" if drop_N else ("S" if drop_S else ("W" if drop_W else "E"))
+
+                    # Try 1x2 / 2x1 Slope along the rim first
+                    if slope_dir in ("N", "S") and c + 2 <= w and not np.any(surf_visited[r:r + 1, c:c + 2]):
+                        if (nearest_indices[r, c + 1] == color_idx
+                                and (groove_mask is None or not groove_mask[r, c + 1])
+                                and is_part_available("slope_1x2", color_id)):
+                            surf_visited[r, c:c + 2] = True
+                            occupied[lz, r, c:c + 2] = True
+                            uid += 1
+                            curr_seam_grid[r, c:c + 2] = uid
+                            surface_placements.append({
+                                "r": r, "c": c, "h": 1, "w": 2,
+                                "z": lz, "z_span": 1,
+                                "color_idx": color_idx,
+                                "bg_color_idx": color_idx,
+                                "part_key": "slope_1x2",
+                                "is_stud": False,
+                                "shape": "slope",
+                                "orient": slope_dir,
+                                "is_structural": False,
+                            })
+                            continue
+                    elif slope_dir in ("E", "W") and r + 2 <= h and not np.any(surf_visited[r:r + 2, c:c + 1]):
+                        if (nearest_indices[r + 1, c] == color_idx
+                                and (groove_mask is None or not groove_mask[r + 1, c])
+                                and is_part_available("slope_curved_2x1", color_id)):
+                            surf_visited[r:r + 2, c] = True
+                            occupied[lz, r:r + 2, c] = True
+                            uid += 1
+                            curr_seam_grid[r:r + 2, c] = uid
+                            surface_placements.append({
+                                "r": r, "c": c, "h": 2, "w": 1,
+                                "z": lz, "z_span": 1,
+                                "color_idx": color_idx,
+                                "bg_color_idx": color_idx,
+                                "part_key": "slope_curved_2x1",
+                                "is_stud": False,
+                                "shape": "slope_curved",
+                                "orient": slope_dir,
+                                "is_structural": False,
+                            })
+                            continue
+
+        # 3. PASS C: Pack interior multi-stud rectangular plates & flat tiles
         for r in range(h):
             for c in range(w):
                 if surf_visited[r, c]:
@@ -563,7 +799,6 @@ def build_interlocking_layers(
                 for sh, sw, part_key in shapes:
                     if not is_part_available(part_key, color_id):
                         continue
-                    # Allow straight 1xN tiles along 1-stud grooves, and 2xN/1xN on non-groove surfaces
                     if is_grv and min(sh, sw) > 1:
                         continue
                     if r + sh <= h and c + sw <= w:
@@ -601,7 +836,8 @@ def build_interlocking_layers(
                         "is_structural": False,
                     })
 
-        # 3. Remaining 1x1 detail & contour groove cells on Layer lz
+        # 4. PASS D: Remaining 1x1 detail cells — use 1x1 Quarter-Circle Curves (#25269)
+        # or 1x1 Cheese Slopes (#54200) on boundary transitions
         for r in range(h):
             for c in range(w):
                 if surf_visited[r, c]:
@@ -620,14 +856,14 @@ def build_interlocking_layers(
                     if 0 <= nr < h and 0 <= nc < w and nearest_indices[nr, nc] != color_idx:
                         neighbors.append(int(nearest_indices[nr, nc]))
 
-                placed_curve = False
+                placed_special = False
                 is_groove_cell = bool(groove_mask[r, c]) if groove_mask is not None else False
                 if neighbors and not is_groove_cell and is_part_available("tile_qtr_1x1", color_id):
                     bg_color_idx = Counter(neighbors).most_common(1)[0][0]
                     orient, improvement = detect_subpixel_orientation(
                         sub_lab, palette_lab[color_idx], palette_lab[bg_color_idx]
                     )
-                    if improvement > 9.5:
+                    if improvement > 6.5:
                         surface_placements.append({
                             "r": r, "c": c, "h": 1, "w": 1,
                             "z": lz, "z_span": 1,
@@ -639,9 +875,32 @@ def build_interlocking_layers(
                             "orient": orient,
                             "is_structural": False,
                         })
-                        placed_curve = True
+                        placed_special = True
 
-                if not placed_curve:
+                # If on an elevated edge or contrasting boundary, place a 1x1 Cheese Slope (#54200)
+                if not placed_special and neighbors and not is_groove_cell and is_part_available("slope_1x1", color_id):
+                    if r > 0 and nearest_indices[r - 1, c] != color_idx:
+                        s_dir = "N"
+                    elif r + 1 < h and nearest_indices[r + 1, c] != color_idx:
+                        s_dir = "S"
+                    elif c > 0 and nearest_indices[r, c - 1] != color_idx:
+                        s_dir = "W"
+                    else:
+                        s_dir = "E"
+                    surface_placements.append({
+                        "r": r, "c": c, "h": 1, "w": 1,
+                        "z": lz, "z_span": 1,
+                        "color_idx": color_idx,
+                        "bg_color_idx": color_idx,
+                        "part_key": "slope_1x1",
+                        "is_stud": False,
+                        "shape": "slope",
+                        "orient": s_dir,
+                        "is_structural": False,
+                    })
+                    placed_special = True
+
+                if not placed_special:
                     part_key = "plate_1x1" if is_stud else "tile_1x1"
                     surface_placements.append({
                         "r": r, "c": c, "h": 1, "w": 1,
@@ -666,10 +925,6 @@ def render_mixed_mosaic(
     grid_size: tuple[int, int],
     target_output_px: int = 2400
 ) -> Image.Image:
-    """
-    Renders the top-down HD mosaic without parallax-shifting elevated bricks over
-    adjacent 1-stud letter grooves, so every 1-stud contour line stays 100% visible.
-    """
     h, w = grid_size
     scale_factor = max(20, target_output_px // max(h, w))
     baseplate_rgb = (24, 28, 34)
@@ -690,7 +945,6 @@ def render_mixed_mosaic(
         base_color = tuple(int(v) for v in palette_rgb[p["color_idx"]])
         bg_color = tuple(int(v) for v in palette_rgb[p["bg_color_idx"]])
 
-        # Depth shading: raised top layer is brightest; recessed grooves/layers are shaded deeper
         z_boost = (z - max_z) * 14 if max_z > 1 else 0
         face_color = clamp_rgb(base_color, z_boost)
         highlight = clamp_rgb(face_color, 38 if z == max_z else 20)
@@ -700,6 +954,18 @@ def render_mixed_mosaic(
 
         if shape == "qtr_1x1":
             draw_quarter_tile(draw, x0, y0, x1, y1, face_color, bg_color, p["orient"], seam)
+        elif shape in ("tri_2x2", "wedge_2x2"):
+            draw_triangular_2x2(
+                draw, x0, y0, x1, y1,
+                face_color, bg_color, p["orient"],
+                seam, highlight, shadow, bevel_w
+            )
+        elif shape in ("slope", "slope_curved"):
+            draw_slope_piece(
+                draw, x0, y0, x1, y1,
+                face_color, p["orient"] or "N",
+                seam, is_curved=(shape == "slope_curved")
+            )
         elif shape in ("round_1x1", "round_2x2"):
             draw.rectangle([x0, y0, x1, y1], fill=shadow, outline=seam, width=1)
             pad = max(1, scale_factor // 10)
@@ -716,8 +982,16 @@ def render_mixed_mosaic(
 
         if p["is_stud"]:
             margin = max(3, int(scale_factor * 0.22))
+            orient = p.get("orient")
             for sr in range(p["h"]):
                 for sc in range(p["w"]):
+                    # Skip the cut-away corner stud on 2x2 Wedge Plates (#24299/#24307)
+                    if shape == "wedge_2x2":
+                        if (orient == "TL" and sr == 1 and sc == 1) or \
+                           (orient == "TR" and sr == 1 and sc == 0) or \
+                           (orient == "BL" and sr == 0 and sc == 1) or \
+                           (orient == "BR" and sr == 0 and sc == 0):
+                            continue
                     cx0 = (p["c"] + sc) * scale_factor + margin
                     cy0 = (p["r"] + sr) * scale_factor + margin
                     cx1 = (p["c"] + sc + 1) * scale_factor - 1 - margin
@@ -779,19 +1053,68 @@ def _draw_iso_brick(
     origin_x: float, origin_y: float,
     u_x: float, u_y: float, z_px: float,
     is_new_step: bool = False,
-    z_span: int = 1
+    z_span: int = 1,
+    shape: str = "rect",
+    orient: str | None = None
 ):
+    """
+    Renders 3D isometric Bricks, Plates, Tiles, 45° Triangular Tiles (#35787),
+    and 3D Pitched Cheese Slopes (#54200 / #85984 / #11477).
+    """
     def proj(row: float, col: float, layer_z: float) -> tuple[float, float]:
         return (origin_x + (col - row) * u_x, origin_y + (col + row) * u_y - layer_z * z_px)
 
     top_col = color_rgb
     left_col = clamp_rgb(color_rgb, -24)
     right_col = clamp_rgb(color_rgb, -44)
+    slope_col = clamp_rgb(color_rgb, -12)
     outline_col = (224, 36, 36) if is_new_step else (42, 46, 52)
     stud_outline = (55, 60, 66)
 
     z_top = float(z)
     z_bot = float(z - z_span)
+
+    if shape in ("slope", "slope_curved"):
+        # True 3D isometric pitched wedge (tapers from z_top ridge down to z_bot toe)
+        z_N = z_bot + 0.25 if orient == "N" else z_top
+        z_S = z_bot + 0.25 if orient == "S" else z_top
+        z_W = z_bot + 0.25 if orient == "W" else z_top
+        z_E = z_bot + 0.25 if orient == "E" else z_top
+
+        p_top = proj(r, c, min(z_N, z_W))
+        p_right = proj(r, c + w, min(z_N, z_E))
+        p_front = proj(r + h, c + w, min(z_S, z_E))
+        p_left = proj(r + h, c, min(z_S, z_W))
+
+        p_left_bot = proj(r + h, c, z_bot)
+        p_front_bot = proj(r + h, c + w, z_bot)
+        p_right_bot = proj(r, c + w, z_bot)
+
+        draw.polygon([p_left, p_front, p_front_bot, p_left_bot], fill=left_col, outline=outline_col)
+        draw.polygon([p_front, p_right, p_right_bot, p_front_bot], fill=right_col, outline=outline_col)
+        draw.polygon([p_top, p_right, p_front, p_left], fill=slope_col, outline=outline_col)
+        if is_new_step:
+            draw.line([p_top, p_right, p_front, p_left, p_top], fill=(224, 36, 36), width=2)
+        return
+
+    if shape in ("tri_2x2", "wedge_2x2"):
+        # 45-degree 3D isometric triangular tile/wedge
+        c_tl = proj(r, c, z_top)
+        c_tr = proj(r, c + w, z_top)
+        c_br = proj(r + h, c + w, z_top)
+        c_bl = proj(r + h, c, z_top)
+        if orient == "TL":
+            tri_pts = [c_tl, c_tr, c_bl]
+        elif orient == "TR":
+            tri_pts = [c_tl, c_tr, c_br]
+        elif orient == "BL":
+            tri_pts = [c_tl, c_br, c_bl]
+        else:
+            tri_pts = [c_tr, c_br, c_bl]
+        draw.polygon(tri_pts, fill=top_col, outline=outline_col)
+        if is_new_step:
+            draw.line(tri_pts + [tri_pts[0]], fill=(224, 36, 36), width=2)
+        return
 
     p_top = proj(r, c, z_top)
     p_right = proj(r, c + w, z_top)
@@ -840,10 +1163,7 @@ def generate_isometric_manual(
     grid_size: tuple[int, int],
     output_manual_path: str
 ) -> str:
-    """
-    100% Wordless 8-Step LEGO-Style Isometric Instruction Manual ('1x', '2x', '3x' only):
-    - Splits layers strictly bottom-to-top (Z=1 -> Z=2 -> Z=3) into 8 balanced steps.
-    """
+    """100% Wordless 8-Step LEGO-Style Isometric Instruction Manual ('1x', '2x', '3x' only)."""
     h, w = grid_size
     all_placements = under_placements + surface_placements
     max_z = max((p.get("z", 1) for p in all_placements), default=1)
@@ -852,7 +1172,6 @@ def generate_isometric_manual(
     font_step = _get_manual_font(28)
     font_small = _get_manual_font(13)
 
-    # Group strictly by layer Z (1..max_z) and split into 8 total steps across the layers
     raw_batches: list[list[dict]] = []
     if max_z == 1:
         splits_per_layer = {1: 8}
@@ -867,7 +1186,6 @@ def generate_isometric_manual(
         layer_pcs = [p for p in all_placements if p.get("z", 1) == lz]
         if not layer_pcs:
             continue
-        # Sort structural under-plates first, then back-to-front along isometric diagonal (r + c)
         layer_pcs.sort(key=lambda p: (0 if p.get("is_structural", False) else 1, p["r"] + p["c"], p["r"], p["c"]))
 
         num_splits = splits_per_layer.get(lz, 2)
@@ -916,12 +1234,12 @@ def generate_isometric_manual(
         draw.text((box_x0 + 8, box_y1 + 14), f"{step_num}", fill=(25, 32, 42), font=font_step)
 
         step_counts = Counter(
-            (p["color_idx"], p["part_key"], p["h"], p["w"], p["is_stud"], p.get("z_span", 1))
+            (p["color_idx"], p["part_key"], p["h"], p["w"], p["is_stud"], p.get("z_span", 1), p.get("shape", "rect"))
             for p in active_pcs
         )
         top_step_parts = step_counts.most_common(10)
 
-        for p_idx, ((c_idx, p_key, ph, pw, is_st, z_sp), qty) in enumerate(top_step_parts):
+        for p_idx, ((c_idx, p_key, ph, pw, is_st, z_sp, shp), qty) in enumerate(top_step_parts):
             rgb = tuple(int(v) for v in palette_rgb[c_idx])
             p_col = p_idx % 2
             p_row = p_idx // 2
@@ -935,7 +1253,9 @@ def generate_isometric_manual(
                 origin_x=cell_x + 28, origin_y=cell_y + 10 + (6 if z_sp > 1 else 0),
                 u_x=7.5, u_y=3.75, z_px=3.2,
                 is_new_step=False,
-                z_span=z_sp
+                z_span=z_sp,
+                shape=shp,
+                orient="TL" if shp in ("tri_2x2", "wedge_2x2") else "N"
             )
             draw.text((cell_x + 68, cell_y + 8), f"{qty}x", fill=(20, 24, 30), font=font_qty)
 
@@ -968,7 +1288,9 @@ def generate_isometric_manual(
                 origin_x=iso_center_x, origin_y=iso_origin_y,
                 u_x=u_x, u_y=u_y, z_px=z_px,
                 is_new_step=is_new,
-                z_span=p.get("z_span", 1)
+                z_span=p.get("z_span", 1),
+                shape=p.get("shape", "rect"),
+                orient=p.get("orient")
             )
 
     map_y0 = iso_section_h
@@ -1048,6 +1370,18 @@ def generate_isometric_manual(
 
         if p["shape"] == "qtr_1x1":
             draw_quarter_tile(draw, x0, y0, x1, y1, rgb, bg_rgb, p["orient"], seam_col)
+        elif p["shape"] in ("tri_2x2", "wedge_2x2"):
+            draw_triangular_2x2(
+                draw, x0, y0, x1, y1,
+                rgb, bg_rgb, p["orient"] or "TL",
+                seam_col, clamp_rgb(rgb, 24), clamp_rgb(rgb, -24), 1
+            )
+        elif p["shape"] in ("slope", "slope_curved"):
+            draw_slope_piece(
+                draw, x0, y0, x1, y1,
+                rgb, p["orient"] or "N",
+                seam_col, is_curved=(p["shape"] == "slope_curved")
+            )
         elif p["shape"] in ("round_1x1", "round_2x2"):
             draw.rectangle([x0, y0, x1, y1], fill=(35, 42, 50), outline=(70, 80, 90), width=1)
             pad = max(1, cell_px // 8)
@@ -1220,8 +1554,6 @@ def generate_brick_mosaic(
     )
     raw_indices = np.argmin(delta_e, axis=-1)
 
-    # Keep non-groove subject body uniform where shading slightly darkened the red brick face,
-    # while snapping 1-stud groove cells to a contrasting darker color (Dark Red #59 or Black #11)
     dark_sub_lab = rgb2lab_numpy(dark_sub_rgb)
     dark_de = delta_e_ciede2000_numpy(
         dark_sub_lab[:, :, np.newaxis, :],
@@ -1382,17 +1714,19 @@ def export_bricklink_xml(
 
     return xml_content
 
+
 def create_demo_image(output_path: str = "demo_rego.png") -> str:
     """
     Generates a crisp 512x512 studio demo image of the boxed 3D 'RE-GO' brick
-    on a yellow backdrop so users can test 2D/3D mosaics and manuals in 1 click.
+    with angled corners & beveled letter cuts so 2x2 Triangular Tiles (#35787),
+    Wedge Plates (#24299/#24307), and Cheese Slopes (#54200/#85984) shine.
     """
-    img = Image.new("RGB", (512, 512), (242, 205, 55))  # Official Yellow (#3) backdrop
+    img = Image.new("RGB", (512, 512), (242, 205, 55))
     draw = ImageDraw.Draw(img)
 
-    red_main = (201, 26, 9)      # Official Red (#5)
-    red_side = (145, 18, 12)     # Shaded left brick wall
-    dark_line = (55, 8, 8)       # Crisp dark groove outline
+    red_main = (201, 26, 9)
+    red_side = (145, 18, 12)
+    dark_line = (55, 8, 8)
 
     # 1. Left shaded 3D side wall & top rim of the brick
     draw.polygon([(76, 178), (112, 196), (112, 384), (76, 362)], fill=red_side, outline=dark_line, width=4)
@@ -1409,26 +1743,20 @@ def create_demo_image(output_path: str = "demo_rego.png") -> str:
     draw.polygon([(112, 196), (440, 136), (440, 324), (112, 384)], fill=red_main, outline=dark_line, width=4)
 
     # 4. Boxed 'RE-GO' letter panels and carved internal letter grooves
-    # Panel dividers between R | E | - | G | O
     for div_x, top_y, bot_y in [(196, 181, 369), (268, 168, 355), (316, 159, 347), (380, 147, 335)]:
         draw.line([(div_x, top_y), (div_x, bot_y)], fill=dark_line, width=5)
 
-    # 'R' inner loop & leg cutout grooves
     draw.rectangle([144, 224, 170, 262], fill=red_side, outline=dark_line, width=4)
     draw.line([(156, 292), (156, 374)], fill=dark_line, width=6)
 
-    # 'E' horizontal bar grooves
     draw.line([(224, 222), (266, 214)], fill=dark_line, width=6)
     draw.line([(224, 278), (266, 270)], fill=dark_line, width=6)
 
-    # '-' center dash box
     draw.polygon([(276, 254), (308, 248), (308, 276), (276, 282)], fill=red_main, outline=dark_line, width=5)
 
-    # 'G' inner hollow & hook groove
     draw.rectangle([338, 196, 360, 304], fill=red_side, outline=dark_line, width=4)
     draw.line([(350, 248), (378, 244)], fill=dark_line, width=5)
 
-    # 'O' inner hollow box
     draw.rectangle([400, 184, 422, 294], fill=red_side, outline=dark_line, width=4)
 
     img.save(output_path, format="PNG")
@@ -1437,7 +1765,7 @@ def create_demo_image(output_path: str = "demo_rego.png") -> str:
 
 if __name__ == "__main__":
     demo_path = create_demo_image("demo_rego.png")
-    print("Running 3D Relief Test on Built-In Demo Image (demo_rego.png)...")
+    print("Running Sculpted Slope & Wedge 3D Test on Demo Image...")
     bom, grid, studs = generate_brick_mosaic(
         input_path=demo_path,
         output_path="test_3d_hd.png",
@@ -1448,6 +1776,9 @@ if __name__ == "__main__":
     total_pcs = sum(bom.values())
     saved_pct = (1.0 - total_pcs / max(1, studs)) * 100.0
     print(f"Done! Grid: {grid} | Stud Volume: {studs} | Pieces: {total_pcs} ({saved_pct:.1f}% saved)")
+    print("\n--- Top Sculpted Slopes, Wedges & Tiles Used ---")
+    for (cid, cname, pid, pname), qty in list(bom.items())[:12]:
+        print(f"  {qty:>4}x  #{pid:<5} {cname} {pname}")
     try:
         os.startfile("test_3d_hd.png")
         os.startfile("test_3d_manual.png")

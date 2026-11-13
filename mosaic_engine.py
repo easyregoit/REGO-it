@@ -388,32 +388,81 @@ def draw_quarter_tile(
 
 
 # --- START OF COMBINED CHANGE IN mosaic_engine.py ---
-_U2NETP_SESSION = None
-
-
 def extract_neural_foreground_mask(img_pil: Image.Image) -> np.ndarray | None:
     """
-    Runs the lightweight 4.7 MB 'u2netp' neural model via rembg (cached globally
-    so Render Free Tier RAM stays under ~160 MB) and returns a boolean subject mask.
+    100% Pure-NumPy + Pillow Iterative Foreground Subject Isolator (Python 3.15 & Render safe):
+    Combines border CIELAB color clustering, local Laplacian focus sharpness, and
+    2-pass GrabCut-style foreground/background probability refinement.
     """
-    global _U2NETP_SESSION
-    try:
-        from rembg import remove, new_session  # type: ignore
-        if _U2NETP_SESSION is None:
-            # Store model weights in /tmp/.u2net so Render's ephemeral filesystem has write access
-            os.environ.setdefault("U2NET_HOME", "/tmp/.u2net")
-            _U2NETP_SESSION = new_session("u2netp")
+    work_img = img_pil.resize((256, 256), Image.Resampling.BILINEAR).convert("RGB")
+    rgb_norm = np.asarray(work_img, dtype=np.float32) / 255.0
+    lab = rgb2lab_numpy(rgb_norm)
+    h, w, _ = lab.shape
 
-        work_img = img_pil.resize((256, 256), Image.Resampling.BILINEAR)
-        mask_pil = remove(work_img, session=_U2NETP_SESSION, only_mask=True)
-        mask_arr = np.asarray(mask_pil, dtype=np.float32)
-        if mask_arr.ndim == 3:
-            mask_arr = mask_arr[..., 0]
-        fg_mask = mask_arr > 95.0
-        if 0.04 < float(np.mean(fg_mask)) < 0.94:
-            return fg_mask
-    except Exception:
-        pass
+    # 1. Local focus/sharpness map (in-focus subject vs. blurry out-of-focus background)
+    gray_u8 = np.clip(
+        (0.2126 * rgb_norm[..., 0] + 0.7152 * rgb_norm[..., 1] + 0.0722 * rgb_norm[..., 2]) * 255.0,
+        0, 255
+    ).astype(np.uint8)
+    pil_g = Image.fromarray(gray_u8, mode="L")
+    g1 = np.asarray(pil_g.filter(ImageFilter.GaussianBlur(radius=1.0)), dtype=np.float32)
+    g2 = np.asarray(pil_g.filter(ImageFilter.GaussianBlur(radius=3.0)), dtype=np.float32)
+    dog = np.abs(g1 - g2)
+    focus_box = Image.fromarray(
+        np.clip((dog / (float(np.percentile(dog, 95)) or 1.0)) * 255.0, 0, 255).astype(np.uint8),
+        mode="L"
+    ).filter(ImageFilter.BoxBlur(radius=6))
+    focus_norm = np.asarray(focus_box, dtype=np.float32) / (float(np.max(focus_box)) or 1.0)
+
+    # 2. Pass 1: Model outer frame background using 6 border color clusters
+    b_pad = 16
+    border_pixels = np.concatenate([
+        lab[:b_pad, :, :].reshape(-1, 3),
+        lab[-b_pad:, :, :].reshape(-1, 3),
+        lab[:, :b_pad, :].reshape(-1, 3),
+        lab[:, -b_pad:, :].reshape(-1, 3),
+    ], axis=0)
+    step = max(1, len(border_pixels) // 6)
+    bg_centers = [np.median(border_pixels[i * step:(i + 1) * step], axis=0) for i in range(6)]
+    bg_dists = [np.linalg.norm(lab - ref[np.newaxis, np.newaxis, :], axis=-1) for ref in bg_centers]
+    d_bg = np.min(np.stack(bg_dists, axis=-1), axis=-1)
+    d_bg_norm = np.clip(d_bg / (float(np.percentile(d_bg, 92)) or 1.0), 0.0, 1.0)
+
+    yy, xx = np.mgrid[0:h, 0:w]
+    radial = np.hypot((yy - h * 0.50) / (h * 0.48), (xx - w * 0.50) / (w * 0.48))
+    center_prior = np.clip(1.22 - 0.50 * (radial ** 2), 0.12, 1.15)
+
+    # Initial foreground probability
+    init_score = (0.60 * d_bg_norm + 0.40 * focus_norm) * center_prior
+    init_fg = (init_score >= np.quantile(init_score, 0.45)) & (radial < 1.15)
+    init_bg = (init_score < np.quantile(init_score, 0.30)) | (radial >= 1.22)
+
+    # 3. Pass 2: Iterative GrabCut-lite refinement (compare pixels against refined FG vs. BG colors)
+    if np.any(init_fg) and np.any(init_bg):
+        fg_pts = lab[init_fg]
+        bg_pts = lab[init_bg]
+        fg_step = max(1, len(fg_pts) // 4)
+        bg_step = max(1, len(bg_pts) // 4)
+        fg_refs = [np.median(fg_pts[i * fg_step:(i + 1) * fg_step], axis=0) for i in range(4)]
+        bg_refs2 = [np.median(bg_pts[i * bg_step:(i + 1) * bg_step], axis=0) for i in range(4)]
+
+        dist_to_fg = np.min(np.stack([np.linalg.norm(lab - r[None, None, :], axis=-1) for r in fg_refs], axis=-1), axis=-1)
+        dist_to_bg = np.min(np.stack([np.linalg.norm(lab - r[None, None, :], axis=-1) for r in bg_refs2], axis=-1), axis=-1)
+
+        fg_likelihood = (dist_to_bg / (dist_to_fg + dist_to_bg + 1e-5)) * (0.75 + 0.25 * focus_norm) * center_prior
+        raw_mask = fg_likelihood >= np.quantile(fg_likelihood, 0.42)
+    else:
+        raw_mask = init_fg
+
+    # Morphological cleanup for smooth, contiguous brick contours
+    mask_img = Image.fromarray((raw_mask.astype(np.uint8) * 255), mode="L")
+    mask_img = mask_img.filter(ImageFilter.MedianFilter(size=9))
+    mask_img = mask_img.filter(ImageFilter.MaxFilter(size=5))
+    mask_img = mask_img.filter(ImageFilter.MinFilter(size=5))
+    fg_mask = np.asarray(mask_img) > 127
+
+    if 0.04 < float(np.mean(fg_mask)) < 0.92:
+        return fg_mask
     return None
 
 

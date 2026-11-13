@@ -1381,3 +1381,75 @@ def export_bricklink_xml(
         f.write(xml_content)
 
     return xml_content
+
+def create_demo_image(output_path: str = "demo_rego.png") -> str:
+    """
+    Generates a crisp 512x512 studio demo image of the boxed 3D 'RE-GO' brick
+    on a yellow backdrop so users can test 2D/3D mosaics and manuals in 1 click.
+    """
+    img = Image.new("RGB", (512, 512), (242, 205, 55))  # Official Yellow (#3) backdrop
+    draw = ImageDraw.Draw(img)
+
+    red_main = (201, 26, 9)      # Official Red (#5)
+    red_side = (145, 18, 12)     # Shaded left brick wall
+    dark_line = (55, 8, 8)       # Crisp dark groove outline
+
+    # 1. Left shaded 3D side wall & top rim of the brick
+    draw.polygon([(76, 178), (112, 196), (112, 384), (76, 362)], fill=red_side, outline=dark_line, width=4)
+    draw.polygon([(76, 178), (404, 118), (440, 136), (112, 196)], fill=red_main, outline=dark_line, width=4)
+
+    # 2. 6 raised studs along the top rim
+    for i in range(6):
+        sx = 122 + i * 52
+        sy = 168 - i * 9
+        draw.rectangle([sx - 16, sy - 12, sx + 16, sy + 4], fill=red_main, outline=dark_line, width=3)
+        draw.ellipse([sx - 16, sy - 18, sx + 16, sy - 6], fill=red_main, outline=dark_line, width=3)
+
+    # 3. Main front brick face (tilted isometric rectangle)
+    draw.polygon([(112, 196), (440, 136), (440, 324), (112, 384)], fill=red_main, outline=dark_line, width=4)
+
+    # 4. Boxed 'RE-GO' letter panels and carved internal letter grooves
+    # Panel dividers between R | E | - | G | O
+    for div_x, top_y, bot_y in [(196, 181, 369), (268, 168, 355), (316, 159, 347), (380, 147, 335)]:
+        draw.line([(div_x, top_y), (div_x, bot_y)], fill=dark_line, width=5)
+
+    # 'R' inner loop & leg cutout grooves
+    draw.rectangle([144, 224, 170, 262], fill=red_side, outline=dark_line, width=4)
+    draw.line([(156, 292), (156, 374)], fill=dark_line, width=6)
+
+    # 'E' horizontal bar grooves
+    draw.line([(224, 222), (266, 214)], fill=dark_line, width=6)
+    draw.line([(224, 278), (266, 270)], fill=dark_line, width=6)
+
+    # '-' center dash box
+    draw.polygon([(276, 254), (308, 248), (308, 276), (276, 282)], fill=red_main, outline=dark_line, width=5)
+
+    # 'G' inner hollow & hook groove
+    draw.rectangle([338, 196, 360, 304], fill=red_side, outline=dark_line, width=4)
+    draw.line([(350, 248), (378, 244)], fill=dark_line, width=5)
+
+    # 'O' inner hollow box
+    draw.rectangle([400, 184, 422, 294], fill=red_side, outline=dark_line, width=4)
+
+    img.save(output_path, format="PNG")
+    return output_path
+
+
+if __name__ == "__main__":
+    demo_path = create_demo_image("demo_rego.png")
+    print("Running 3D Relief Test on Built-In Demo Image (demo_rego.png)...")
+    bom, grid, studs = generate_brick_mosaic(
+        input_path=demo_path,
+        output_path="test_3d_hd.png",
+        grid_size=(64, 64),
+        z_layers=3,
+        manual_output_path="test_3d_manual.png",
+    )
+    total_pcs = sum(bom.values())
+    saved_pct = (1.0 - total_pcs / max(1, studs)) * 100.0
+    print(f"Done! Grid: {grid} | Stud Volume: {studs} | Pieces: {total_pcs} ({saved_pct:.1f}% saved)")
+    try:
+        os.startfile("test_3d_hd.png")
+        os.startfile("test_3d_manual.png")
+    except Exception:
+        pass

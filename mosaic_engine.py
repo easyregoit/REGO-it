@@ -453,35 +453,120 @@ def filter_background_and_abstract_subject(
     return poster_img, fg_mask, bg_palette_idx
 
 
+def detect_boxed_grooves_and_preserve_lines(
+    img_cropped: Image.Image,
+    grid_size: tuple[int, int]
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Detects thin dark outlines, letter boxes, and structural creases at 512x512 BEFORE downsampling
+    so boxed letters (like 'RE-GO') are never washed out by LANCZOS averaging.
+    Returns:
+      - groove_mask (h, w): True where a crisp dark contour/box outline exists on the stud grid.
+      - dark_sub_rgb (h, w, 3): The darkest 20th-percentile RGB color inside each stud cell.
+    """
+    gh, gw = grid_size
+    factor = max(2, 512 // max(gh, gw))
+    work_h, work_w = gh * factor, gw * factor
+    hi_img = img_cropped.resize((work_w, work_h), Image.Resampling.BILINEAR)
+    hi_rgb = np.asarray(hi_img, dtype=np.float32) / 255.0
+    hi_gray = 0.2126 * hi_rgb[..., 0] + 0.7152 * hi_rgb[..., 1] + 0.0722 * hi_rgb[..., 2]
+
+    # Black-hat morphological valley detector: local maximum minus pixel brightness catches thin dark lines
+    gray_u8 = np.clip(hi_gray * 255.0, 0, 255).astype(np.uint8)
+    dilated_u8 = np.asarray(
+        Image.fromarray(gray_u8, mode="L").filter(ImageFilter.MaxFilter(size=max(3, factor | 1))),
+        dtype=np.float32
+    )
+    valley_hi = (dilated_u8 - gray_u8.astype(np.float32)) / 255.0
+
+    # Max-pool valley strength per stud cell so 2px outlines survive downsampling
+    valley_blocks = valley_hi.reshape(gh, factor, gw, factor)
+    max_valley = np.max(valley_blocks, axis=(1, 3))
+    mean_valley = np.mean(valley_blocks, axis=(1, 3))
+    groove_score = 0.70 * max_valley + 0.30 * mean_valley
+
+    # Adaptive threshold: cells with a sharp dark stroke inside a brighter surrounding
+    groove_thresh = max(0.085, float(np.quantile(groove_score, 0.82)))
+    groove_mask = groove_score >= groove_thresh
+
+    # Compute the 20th-percentile darkest RGB inside each stud block to color the preserved outline accurately
+    rgb_blocks = hi_rgb.reshape(gh, factor, gw, factor, 3).transpose(0, 2, 1, 3, 4).reshape(gh, gw, factor * factor, 3)
+    luma_blocks = 0.2126 * rgb_blocks[..., 0] + 0.7152 * rgb_blocks[..., 1] + 0.0722 * rgb_blocks[..., 2]
+    dark_idx = np.argsort(luma_blocks, axis=-1)[:, :, :max(1, (factor * factor) // 5)]
+    row_idx = np.arange(gh)[:, None, None]
+    col_idx = np.arange(gw)[None, :, None]
+    dark_sub_rgb = np.mean(rgb_blocks[row_idx, col_idx, dark_idx], axis=2)
+
+    return groove_mask, dark_sub_rgb
+
+
 def compute_stable_terrace_z_grid(
     img_lab: np.ndarray,
     edge_map: np.ndarray,
     grid_size: tuple[int, int],
     z_layers: int = 1,
     z_mode: str = "luminance",
-    fg_mask_grid: np.ndarray | None = None
+    fg_mask_grid: np.ndarray | None = None,
+    groove_mask: np.ndarray | None = None
 ) -> np.ndarray:
     """
-    Computes a morphologically smoothed, terraced Z-height map (1..z_layers) BEFORE packing bricks.
-    Guarantees that:
-    - Elevated areas form solid contiguous plateaus (no spiky 1x1 towers).
-    - Every upper layer (Z=3, 4) sits inside a wider lower terrace (Z=2) for physical stability.
+    Subject- and Box-Aware 3D Elevation Map:
+    1. Automatically locks the outer background color (e.g. yellow backdrop) to Base Layer Z=1.
+    2. Elevates the foreground boxed subject to Z=z_layers (e.g. Z=3).
+    3. Carves internal contour lines / letter outlines (`groove_mask`) 1 layer lower (Z=z_layers-1)
+       so boxed letters and brick panels pop out cleanly as flat, physical 3D relief plateaus!
     """
     h, w = grid_size
     if z_layers <= 1:
         return np.ones((h, w), dtype=np.int32)
 
-    if fg_mask_grid is not None and z_layers == 2:
-        # In Abstract Frame mode, elevate the smoothed subject plateau cleanly to Z=2
-        m_img = Image.fromarray((fg_mask_grid.astype(np.uint8) * 255), mode="L")
-        m_img = m_img.filter(ImageFilter.MedianFilter(size=3))
-        clean_fg = np.asarray(m_img) > 127
-        clean_fg[0:2, :] = False
-        clean_fg[-2:, :] = False
-        clean_fg[:, 0:2] = False
-        clean_fg[:, -2:] = False
-        return np.where(clean_fg, 2, 1).astype(np.int32)
+    # 1. Detect outer border background color in CIELAB so bright backgrounds stay flat at Z=1
+    b_pad = max(2, min(h, w) // 12)
+    border_lab = np.concatenate([
+        img_lab[:b_pad, :, :].reshape(-1, 3),
+        img_lab[-b_pad:, :, :].reshape(-1, 3),
+        img_lab[:, :b_pad, :].reshape(-1, 3),
+        img_lab[:, -b_pad:, :].reshape(-1, 3),
+    ], axis=0)
+    median_bg_lab = np.median(border_lab, axis=0)
+    border_spread = float(np.percentile(np.linalg.norm(border_lab - median_bg_lab, axis=-1), 75))
+    dist_to_bg = np.linalg.norm(img_lab - median_bg_lab[np.newaxis, np.newaxis, :], axis=-1)
 
+    has_clean_backdrop = border_spread < 18.0
+    if fg_mask_grid is not None:
+        is_subject = fg_mask_grid.copy()
+    elif has_clean_backdrop:
+        # Everything distinct from the uniform outer backdrop is part of the elevated 3D subject
+        raw_subj = dist_to_bg > max(14.0, border_spread * 2.2)
+        subj_img = Image.fromarray((raw_subj.astype(np.uint8) * 255), mode="L")
+        subj_img = subj_img.filter(ImageFilter.MaxFilter(size=3)).filter(ImageFilter.MinFilter(size=3))
+        is_subject = np.asarray(subj_img) > 127
+    else:
+        is_subject = np.ones((h, w), dtype=bool)
+
+    if has_clean_backdrop and np.any(is_subject) and np.mean(is_subject) < 0.85:
+        # Boxed Subject / Logo / Graphic Relief Mode:
+        # Background = Layer 1; Subject Body & Boxed Letter Faces = Top Layer (z_layers);
+        # Internal Box Outlines / Shaded Side Panels = Mid Layer (z_layers - 1)
+        z_grid = np.ones((h, w), dtype=np.int32)
+        mid_z = max(1, z_layers - 1)
+
+        subj_L = img_lab[..., 0][is_subject]
+        shade_cutoff = float(np.percentile(subj_L, 28)) if len(subj_L) > 0 else 40.0
+        is_shaded_panel = is_subject & (img_lab[..., 0] <= shade_cutoff)
+
+        # Elevate entire subject to top plateau first
+        z_grid[is_subject] = z_layers
+        # Step down shaded side walls and internal box/letter contour grooves by 1 layer
+        if z_layers >= 3:
+            z_grid[is_shaded_panel] = mid_z
+            if groove_mask is not None:
+                z_grid[is_subject & groove_mask] = mid_z
+        elif z_layers == 2 and groove_mask is not None:
+            z_grid[is_subject & groove_mask] = 1
+        return z_grid
+
+    # Fallback for full-bleed photographs without a uniform backdrop
     lum_norm = np.clip(img_lab[..., 0] / 100.0, 0.0, 1.0)
     edge_max = float(np.max(edge_map)) or 1.0
     edge_norm = edge_map / edge_max
@@ -493,21 +578,16 @@ def compute_stable_terrace_z_grid(
     else:
         raw_score = 0.75 * lum_norm + 0.25 * edge_norm
 
-    # Smooth score map so Z-layers form broad, stable LEGO terraces instead of noisy spikes
     score_u8 = np.clip(raw_score * 255.0, 0, 255).astype(np.uint8)
-    score_img = Image.fromarray(score_u8, mode="L").filter(ImageFilter.MedianFilter(size=5))
+    score_img = Image.fromarray(score_u8, mode="L").filter(ImageFilter.MedianFilter(size=3))
     smooth_score = np.asarray(score_img, dtype=np.float32) / 255.0
 
     quantiles = [i / z_layers for i in range(1, z_layers)]
     cutoffs = np.quantile(smooth_score, quantiles)
     z_grid = (np.searchsorted(cutoffs, smooth_score) + 1).astype(np.int32)
 
-    # Enforce stepped pyramid terrace rule: Layer Z must be supported by a wider Layer Z-1
-    for lz in range(z_layers, 2, -1):
-        upper_mask = (z_grid >= lz).astype(np.uint8) * 255
-        dilated = Image.fromarray(upper_mask, mode="L").filter(ImageFilter.MaxFilter(size=3))
-        must_support = np.asarray(dilated) > 127
-        z_grid = np.where(must_support & (z_grid < lz - 1), lz - 1, z_grid)
+    if groove_mask is not None and z_layers >= 2:
+        z_grid = np.where(groove_mask & (z_grid > 1), z_grid - 1, z_grid)
 
     return z_grid
 
@@ -520,14 +600,12 @@ def build_interlocking_layers(
     palette_lab: np.ndarray,
     palette_keys: list[tuple[int, str]],
     z_grid: np.ndarray,
+    groove_mask: np.ndarray | None = None,
     filler_color_id: int = 86  # 86 = Light Bluish Gray structural plates
 ) -> tuple[list[dict], list[dict]]:
     """
-    Packs the mosaic strictly layer-by-layer from Z = 1 up to max_z:
-    - On Layer Z, cells that reach their final height (z_grid == Z) get their visible surface brick.
-    - Cells that will rise higher (z_grid > Z) get structural studded plates in a 90°-rotated
-      orientation that bridges across the seams of Layer Z-1.
-    - Every piece on Layer Z>1 is scored to overlap at least 2 pieces from Layer Z-1.
+    Packs the mosaic strictly layer-by-layer from Z = 1 up to max_z with 90-degree
+    cross-seam interlocking, keeping boxed letters crisp with square plates/tiles.
     """
     h, w = nearest_indices.shape
     max_z = int(np.max(z_grid))
@@ -556,8 +634,7 @@ def build_interlocking_layers(
         (2, 4, "tile_2x4"), (1, 4, "tile_1x4"), (1, 3, "tile_1x3"), (1, 2, "tile_1x2"),
     ]
 
-    high_edge_thresh = np.quantile(edge_map, 0.68)
-    med_edge_thresh = np.quantile(edge_map, 0.50)
+    high_edge_thresh = np.quantile(edge_map, 0.75)
 
     surface_placements: list[dict] = []
     under_placements: list[dict] = []
@@ -570,7 +647,7 @@ def build_interlocking_layers(
         plate_order = horiz_First if odd_layer else vert_First
         tile_order = horiz_Tiles if odd_layer else vert_Tiles
 
-        # 1. Pack structural studded plates for all cells where z_grid > lz
+        # 1. Pack structural studded under-plates for all cells where z_grid > lz
         struct_visited = ~(z_grid > lz)
         for r in range(h):
             for c in range(w):
@@ -608,8 +685,10 @@ def build_interlocking_layers(
         surf_visited = ~(z_grid == lz)
         for r in range(h):
             for c in range(w):
-                if surf_visited[r, c] or edge_map[r, c] > high_edge_thresh:
+                if surf_visited[r, c]:
                     continue
+                if groove_mask is not None and groove_mask[r, c]:
+                    continue  # Keep 1-stud contour grooves sharp before packing multi-stud blocks
                 color_idx = int(nearest_indices[r, c])
                 color_id = palette_keys[color_idx][0]
                 is_stud = bool(stud_mask[r, c])
@@ -624,7 +703,11 @@ def build_interlocking_layers(
                         reg_vis = surf_visited[r:r + sh, c:c + sw]
                         reg_col = nearest_indices[r:r + sh, c:c + sw]
                         reg_stud = stud_mask[r:r + sh, c:c + sw]
-                        if not np.any(reg_vis) and np.all(reg_col == color_idx) and np.all(reg_stud == is_stud):
+                        reg_grv = groove_mask[r:r + sh, c:c + sw] if groove_mask is not None else False
+                        if (not np.any(reg_vis)
+                                and not np.any(reg_grv)
+                                and np.all(reg_col == color_idx)
+                                and np.all(reg_stud == is_stud)):
                             bridged = len(np.unique(prev_seam_grid[r:r + sh, c:c + sw])) if lz > 1 else 1
                             score = (bridged * 30) + (sh * sw * 6)
                             if score > best_score:
@@ -635,13 +718,6 @@ def build_interlocking_layers(
 
                 if best_candidate is not None:
                     sh, sw, part_key = best_candidate
-                    final_key = part_key
-                    shape_type = "rect"
-                    if (part_key == "tile_2x2"
-                            and is_part_available("tile_round_2x2", color_id)
-                            and np.mean(edge_map[r:r + 2, c:c + 2]) > med_edge_thresh):
-                        final_key = "tile_round_2x2"
-                        shape_type = "round_2x2"
                     surf_visited[r:r + sh, c:c + sw] = True
                     uid += 1
                     curr_seam_grid[r:r + sh, c:c + sw] = uid
@@ -649,14 +725,14 @@ def build_interlocking_layers(
                         "r": r, "c": c, "h": sh, "w": sw, "z": lz,
                         "color_idx": color_idx,
                         "bg_color_idx": color_idx,
-                        "part_key": final_key,
+                        "part_key": part_key,
                         "is_stud": is_stud,
-                        "shape": shape_type,
+                        "shape": "rect",
                         "orient": None,
                         "is_structural": False,
                     })
 
-        # 3. Remaining 1x1 detail cells on Layer lz
+        # 3. Remaining 1x1 detail & contour groove cells on Layer lz (uses square 1x1s to prevent black gaps)
         for r in range(h):
             for c in range(w):
                 if surf_visited[r, c]:
@@ -675,12 +751,13 @@ def build_interlocking_layers(
                         neighbors.append(int(nearest_indices[nr, nc]))
 
                 placed_curve = False
-                if neighbors and is_part_available("tile_qtr_1x1", color_id):
+                is_groove_cell = bool(groove_mask[r, c]) if groove_mask is not None else False
+                if neighbors and not is_groove_cell and is_part_available("tile_qtr_1x1", color_id):
                     bg_color_idx = Counter(neighbors).most_common(1)[0][0]
                     orient, improvement = detect_subpixel_orientation(
                         sub_lab, palette_lab[color_idx], palette_lab[bg_color_idx]
                     )
-                    if improvement > 8.5:
+                    if improvement > 9.5:
                         surface_placements.append({
                             "r": r, "c": c, "h": 1, "w": 1, "z": lz,
                             "color_idx": color_idx,
@@ -694,21 +771,14 @@ def build_interlocking_layers(
                         placed_curve = True
 
                 if not placed_curve:
-                    want_round = edge_map[r, c] > high_edge_thresh
-                    if is_stud:
-                        can_round = want_round and is_part_available("plate_round_1x1", color_id)
-                        part_key = "plate_round_1x1" if can_round else "plate_1x1"
-                    else:
-                        can_round = want_round and is_part_available("tile_round_1x1", color_id)
-                        part_key = "tile_round_1x1" if can_round else "tile_1x1"
-
+                    part_key = "plate_1x1" if is_stud else "tile_1x1"
                     surface_placements.append({
                         "r": r, "c": c, "h": 1, "w": 1, "z": lz,
                         "color_idx": color_idx,
                         "bg_color_idx": color_idx,
                         "part_key": part_key,
                         "is_stud": is_stud,
-                        "shape": "round_1x1" if can_round else "rect",
+                        "shape": "rect",
                         "orient": None,
                         "is_structural": False,
                     })
@@ -724,14 +794,19 @@ def render_mixed_mosaic(
     grid_size: tuple[int, int],
     target_output_px: int = 2400
 ) -> Image.Image:
+    """
+    Renders 2D and 3D mosaics with crisp step-relief shading so elevated boxed letters
+    and plateaus stand out cleanly without shifting over and covering 1-stud outlines.
+    """
     h, w = grid_size
     scale_factor = max(20, target_output_px // max(h, w))
-    baseplate_rgb = (18, 22, 26)
+    baseplate_rgb = (24, 28, 34)
     canvas = Image.new("RGB", (w * scale_factor, h * scale_factor), baseplate_rgb)
     draw = ImageDraw.Draw(canvas)
-    bevel_w = max(1, scale_factor // 16)
-    z_step_px = max(2, scale_factor // 9)
+    bevel_w = max(1, scale_factor // 15)
+    z_step_px = max(1, scale_factor // 16)
 
+    max_z = max((p.get("z", 1) for p in placements), default=1)
     sorted_placements = sorted(placements, key=lambda item: (item.get("z", 1), item["r"], item["c"]))
 
     for p in sorted_placements:
@@ -745,20 +820,23 @@ def render_mixed_mosaic(
 
         base_color = tuple(int(v) for v in palette_rgb[p["color_idx"]])
         bg_color = tuple(int(v) for v in palette_rgb[p["bg_color_idx"]])
-        z_boost = (z - 1) * 8
+
+        # Subtle depth lighting: top layer is brightest; recessed grooves/layers are slightly shaded
+        z_boost = (z - max_z) * 10 if max_z > 1 else 0
         face_color = clamp_rgb(base_color, z_boost)
-        highlight = clamp_rgb(face_color, 34)
-        shadow = clamp_rgb(face_color, -40)
-        wall_color = clamp_rgb(base_color, -55)
-        seam = clamp_rgb(base_color, -70)
+        highlight = clamp_rgb(face_color, 36)
+        shadow = clamp_rgb(face_color, -42)
+        wall_color = clamp_rgb(base_color, -52)
+        seam = clamp_rgb(base_color, -68)
 
         if z > 1:
-            sh_pad = elev_offset + 2
+            # Draw subtle 3D side wall & drop-shadow without swallowing adjacent 1-stud grooves
+            sh_pad = max(2, elev_offset + 1)
             draw.rectangle(
                 [raw_x0 + sh_pad, raw_y0 + sh_pad,
                  min(w * scale_factor - 1, raw_x1 + sh_pad),
                  min(h * scale_factor - 1, raw_y1 + sh_pad)],
-                fill=(10, 12, 15)
+                fill=clamp_rgb(base_color, -85)
             )
             draw.rectangle([raw_x0, raw_y0, raw_x1, raw_y1], fill=wall_color, outline=seam, width=1)
 
@@ -771,6 +849,7 @@ def render_mixed_mosaic(
         if shape == "qtr_1x1":
             draw_quarter_tile(draw, x0, y0, x1, y1, face_color, bg_color, p["orient"], seam)
         elif shape in ("round_1x1", "round_2x2"):
+            draw.rectangle([x0, y0, x1, y1], fill=wall_color, outline=seam, width=1)
             pad = max(1, scale_factor // 10)
             draw.ellipse([x0 + pad, y0 + pad, x1 - pad, y1 - pad], fill=face_color, outline=seam, width=1)
             draw.arc([x0 + pad + 1, y0 + pad + 1, x1 - pad - 1, y1 - pad - 1],
@@ -825,7 +904,6 @@ def _draw_iso_baseplate(
     draw.polygon([p_front, p_right, p_right_bot, p_front_bot], fill=right_col, outline=edge_col)
     draw.polygon([p_top, p_right, p_front, p_left], fill=top_col, outline=edge_col)
 
-    # Subtle 1x1 grid lines so builders can count studs on empty baseplate areas
     grid_line_col = (96, 100, 104)
     for r in range(1, h):
         draw.line([proj(r, 0, 0.0), proj(r, w, 0.0)], fill=grid_line_col, width=1)
@@ -850,18 +928,12 @@ def _draw_iso_brick(
     u_x: float, u_y: float, z_px: float,
     is_new_step: bool = False
 ):
-    """
-    Draws a 3D isometric LEGO plate/tile with true 0.40x plate thickness.
-    Previous steps render in natural LEGO colors with crisp dark-gray ink outlines;
-    newly placed bricks in the current step get an authentic LEGO red placement outline.
-    """
     def proj(row: float, col: float, layer_z: float) -> tuple[float, float]:
         return (origin_x + (col - row) * u_x, origin_y + (col + row) * u_y - layer_z * z_px)
 
     top_col = color_rgb
     left_col = clamp_rgb(color_rgb, -24)
     right_col = clamp_rgb(color_rgb, -44)
-    # Authentic LEGO instruction manual ink outline: dark charcoal for existing, bright red for current step
     outline_col = (224, 36, 36) if is_new_step else (42, 46, 52)
     stud_outline = (55, 60, 66)
 
@@ -882,7 +954,6 @@ def _draw_iso_brick(
     draw.polygon([p_top, p_right, p_front, p_left], fill=top_col, outline=outline_col)
 
     if is_new_step:
-        # Crisp red highlight border around the newly added piece's top face
         draw.line([p_top, p_right, p_front, p_left, p_top], fill=(224, 36, 36), width=2)
 
     if is_stud and u_x >= 3.8:
@@ -902,7 +973,6 @@ def _draw_iso_brick(
 
 
 def _get_manual_font(size: int = 16):
-    """Loads a clean scaled font for '1x', '2x', '3x' quantities and step numbers."""
     from PIL import ImageFont
     try:
         return ImageFont.load_default(size=size)
@@ -918,12 +988,7 @@ def generate_isometric_manual(
     grid_size: tuple[int, int],
     output_manual_path: str
 ) -> str:
-    """
-    100% Wordless LEGO-Style Isometric Instruction Manual:
-    - Callout boxes show ONLY the 3D isometric brick icon and '1x', '2x', '3x' quantity.
-    - Step panels show ONLY the step number ('1', '2', '3'...).
-    - Bottom 2D coordinate map shows ONLY numbered color swatches ('1', '2'...) and '1x', '2x' counts.
-    """
+    """100% Wordless LEGO-Style Isometric Instruction Manual ('1x', '2x', '3x' only)."""
     h, w = grid_size
     all_placements = under_placements + surface_placements
     max_z = max((p.get("z", 1) for p in all_placements), default=1)
@@ -932,7 +997,6 @@ def generate_isometric_manual(
     font_step = _get_manual_font(28)
     font_small = _get_manual_font(13)
 
-    # 1. Build 6-to-8 progressive steps ordered bottom-to-top (Z) and back-to-front (r+c)
     raw_batches: list[list[dict]] = []
     for lz in range(1, max_z + 1):
         layer_pcs = [p for p in all_placements if p.get("z", 1) == lz]
@@ -960,13 +1024,9 @@ def generate_isometric_manual(
     map_section_h = 1220
     page_h = iso_section_h + map_section_h
 
-    # Authentic LEGO Manual pastel sky-blue page background (#E4F0F8)
     manual = Image.new("RGB", (page_w, page_h), (228, 240, 248))
     draw = ImageDraw.Draw(manual)
 
-    # ==========================================================================
-    # PART A: WORDLESS 3D ISOMETRIC STEP PANELS (ONLY '1x', '2x', '3x' & STEP #)
-    # ==========================================================================
     for idx, (step_num, prior_pcs, active_pcs) in enumerate(steps):
         row_idx = idx // cols
         col_idx = idx % cols
@@ -977,7 +1037,6 @@ def generate_isometric_manual(
 
         draw.rectangle([px0, py0, px1, py1], fill=(228, 240, 248), outline=(255, 255, 255), width=4)
 
-        # Parts Callout Box (2-column internal grid of mini 3D bricks + "1x", "2x", "3x")
         box_x0, box_y0 = px0 + 24, py0 + 24
         box_x1, box_y1 = px0 + 300, py0 + 425
         draw.rounded_rectangle(
@@ -988,7 +1047,6 @@ def generate_isometric_manual(
             width=2
         )
 
-        # Large wordless Step Number ("1", "2", "3"...) below the callout box
         draw.text((box_x0 + 8, box_y1 + 14), f"{step_num}", fill=(25, 32, 42), font=font_step)
 
         step_counts = Counter((p["color_idx"], p["part_key"], p["h"], p["w"], p["is_stud"]) for p in active_pcs)
@@ -1002,7 +1060,6 @@ def generate_isometric_manual(
             cell_x = box_x0 + 18 + p_col * 132
             cell_y = box_y0 + 26 + p_row * 76
 
-            # Draw mini 3D isometric brick
             _draw_iso_brick(
                 draw, r=0, c=0, h=min(2, ph), w=min(3, pw), z=1,
                 color_rgb=rgb, is_stud=is_st,
@@ -1010,10 +1067,8 @@ def generate_isometric_manual(
                 u_x=7.5, u_y=3.75, z_px=3.2,
                 is_new_step=False
             )
-            # Draw ONLY quantity ("1x", "2x", "3x"...) right next to the brick
             draw.text((cell_x + 68, cell_y + 8), f"{qty}x", fill=(20, 24, 30), font=font_qty)
 
-        # Right-Side 3D Isometric Board Assembly
         u_x = min(9.5, max(3.6, 265.0 / max(h, w)))
         u_y = u_x * 0.50
         z_px = u_x * 0.40
@@ -1038,9 +1093,6 @@ def generate_isometric_manual(
                 is_new_step=is_new
             )
 
-    # ==========================================================================
-    # PART B: WORDLESS 2D COORDINATE MAP & QUANTITY KEY ('1x', '2x', '3x' ONLY)
-    # ==========================================================================
     map_y0 = iso_section_h
     draw.rectangle([0, map_y0, page_w, page_h], fill=(238, 245, 250), outline=(255, 255, 255), width=4)
 
@@ -1049,7 +1101,6 @@ def generate_isometric_manual(
     for rank_idx, (c_idx, _) in enumerate(color_usage.most_common(), start=1):
         color_num_map[c_idx] = rank_idx
 
-    # Left Box: Wordless Color Swatch + Quantity ('1x', '2x', '3x')
     leg_x0, leg_y0 = 24, map_y0 + 36
     leg_x1, leg_y1 = 420, page_h - 24
     draw.rounded_rectangle(
@@ -1072,15 +1123,11 @@ def generate_isometric_manual(
         sx = leg_x0 + 24 + sub_col * 185
         sy = leg_y0 + 24 + sub_row * 68
 
-        # Numbered Color Swatch
         draw.rounded_rectangle([sx, sy, sx + 44, sy + 44], radius=6, fill=rgb, outline=(60, 70, 80), width=2)
         num_str = str(key_num)
         draw.text((sx + (16 if len(num_str) == 1 else 11), sy + 13), num_str, fill=txt_col, font=font_qty)
-
-        # ONLY Quantity ('1x', '2x', '3x'...) next to swatch — zero words
         draw.text((sx + 56, sy + 13), f"{pcs_count}x", fill=(25, 32, 40), font=font_qty)
 
-    # Right Area: 2D Top-Down Stud Coordinate Grid
     grid_area_x0 = 460
     grid_area_y0 = map_y0 + 56
     max_grid_px = 1100
@@ -1162,10 +1209,6 @@ def generate_isometric_manual(
 
 # --- START OF TRUE-TONE COLOR CHANGE IN mosaic_engine.py ---
 def delta_e_ciede2000_numpy(lab1: np.ndarray, lab2: np.ndarray) -> np.ndarray:
-    """
-    Perceptual CIEDE2000 color distance between image pixels (H, W, 1, 3)
-    and official brick palette (1, 1, N, 3) for true-tone color accuracy.
-    """
     L1, a1, b1 = lab1[..., 0], lab1[..., 1], lab1[..., 2]
     L2, a2, b2 = lab2[..., 0], lab2[..., 1], lab2[..., 2]
 
@@ -1272,6 +1315,9 @@ def generate_brick_mosaic(
         if grid_size is None:
             grid_size = auto_detect_grid_size(img_cropped)
 
+    # Detect thin boxed letter outlines & structural grooves at 512x512 BEFORE downsampling
+    groove_mask, dark_sub_rgb = detect_boxed_grooves_and_preserve_lines(img_cropped, grid_size)
+
     if pre_sharpen and not abstract_mode:
         img_cropped = img_cropped.filter(ImageFilter.UnsharpMask(radius=1.0, percent=80, threshold=4))
 
@@ -1290,6 +1336,15 @@ def generate_brick_mosaic(
         palette_lab[np.newaxis, np.newaxis, :, :]
     )
     raw_indices = np.argmin(delta_e, axis=-1)
+
+    # Preserve boxed letter outlines (e.g. 'RE-GO' internal lines) by matching the darkest sub-pixels on groove cells
+    dark_sub_lab = rgb2lab_numpy(dark_sub_rgb)
+    dark_de = delta_e_ciede2000_numpy(
+        dark_sub_lab[:, :, np.newaxis, :],
+        palette_lab[np.newaxis, np.newaxis, :, :]
+    )
+    dark_indices = np.argmin(dark_de, axis=-1)
+    raw_indices = np.where(groove_mask, dark_indices, raw_indices)
 
     if abstract_mode and fg_mask_grid is not None:
         raw_indices = np.where(fg_mask_grid, raw_indices, bg_palette_idx)
@@ -1310,22 +1365,15 @@ def generate_brick_mosaic(
         raw_indices[:, -1] = black_idx
 
     edge_map = sobel_edges_numpy(img_rgb_norm)
+    # Boost edge_map on groove cells so denoise_and_smooth_grid never erases boxed letter outlines
+    edge_map = np.where(groove_mask, np.max(edge_map) + 1.0, edge_map)
     nearest_indices = denoise_and_smooth_grid(
         raw_indices, delta_e, edge_map, merge_tolerance_de=merge_tolerance_de
     )
 
-    threshold = np.quantile(edge_map, 1.0 - stud_ratio)
-    stud_mask = edge_map >= threshold
-    if abstract_mode and fg_mask_grid is not None:
-        stud_mask = stud_mask & fg_mask_grid
-        stud_mask[0, :] = False
-        stud_mask[-1, :] = False
-        stud_mask[:, 0] = False
-        stud_mask[:, -1] = False
-
     effective_z = max(2, z_layers) if abstract_mode else z_layers
 
-    # 1. Compute smoothed, terraced Z-height map first so no piece straddles unstable heights
+    # 1. Compute Boxed-Subject 3D Elevation Map first
     z_grid = compute_stable_terrace_z_grid(
         img_lab=img_lab,
         edge_map=edge_map,
@@ -1333,9 +1381,24 @@ def generate_brick_mosaic(
         z_layers=effective_z,
         z_mode=z_mode,
         fg_mask_grid=fg_mask_grid,
+        groove_mask=groove_mask,
     )
 
-    # 2. Pack each layer from Z=1 to effective_z with 90-degree cross-seam interlocking
+    # 2. Put tactile studs on elevated boxed letters/surfaces, and smooth flat tiles in recessed grooves & background
+    if effective_z > 1:
+        stud_mask = (z_grid == np.max(z_grid)) & (~groove_mask)
+    else:
+        threshold = np.quantile(edge_map, 1.0 - stud_ratio)
+        stud_mask = (edge_map >= threshold) & (~groove_mask)
+
+    if abstract_mode and fg_mask_grid is not None:
+        stud_mask = stud_mask & fg_mask_grid
+        stud_mask[0, :] = False
+        stud_mask[-1, :] = False
+        stud_mask[:, 0] = False
+        stud_mask[:, -1] = False
+
+    # 3. Pack each layer from Z=1 to effective_z with 90-degree cross-seam interlocking
     surface_placements, under_placements = build_interlocking_layers(
         nearest_indices=nearest_indices,
         stud_mask=stud_mask,
@@ -1344,6 +1407,7 @@ def generate_brick_mosaic(
         palette_lab=palette_lab,
         palette_keys=palette_keys,
         z_grid=z_grid,
+        groove_mask=groove_mask,
     )
 
     mosaic_img = render_mixed_mosaic(surface_placements, palette_rgb, grid_size, target_output_px=target_output_px)

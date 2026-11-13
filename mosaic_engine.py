@@ -1,7 +1,6 @@
 import os
-import importlib
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter, ImageOps
+from PIL import Image, ImageDraw, ImageFilter, ImageOps, ImageFont
 from collections import Counter
 
 # Curated dictionary of active, high-availability official brick colors (RGB)
@@ -51,7 +50,6 @@ GRID_PRESETS = {
 }
 
 # Universal Part IDs (compatible with both BrickLink and BrickOwl XML importers)
-# Universal Part IDs (compatible with both BrickLink and BrickOwl XML importers)
 PART_CATALOG = {
     # Full-Height Standard Bricks (1 Brick = 3 Plates Tall)
     "brick_2x4":       ("3001",  "Brick 2 x 4 (3-Plate Tall)"),
@@ -86,26 +84,28 @@ PART_CATALOG = {
     "tile_qtr_1x1":    ("25269", "Tile 1 x 1 Quarter Circle (Curved)"),
 }
 
-# Colors (by BrickLink Color ID) where newer/specialty parts are poorly stocked or nonexistent.
-# Restricting these parts to high-production colors eliminates BrickOwl "Rows with issues"!
+PLATE_TO_BRICK_KEY = {
+    "plate_2x4": "brick_2x4",
+    "plate_2x3": "brick_2x3",
+    "plate_2x2": "brick_2x2",
+    "plate_1x4": "brick_1x4",
+    "plate_1x3": "brick_1x3",
+    "plate_1x2": "brick_1x2",
+    "plate_1x1": "brick_1x1",
+}
+
 PART_COLOR_WHITELIST = {
-    # Quarter-circle tile (#25269) only in common active colors (excludes Nougat, Sand Blue, Dark Brown, Bright Green)
     "tile_qtr_1x1":    {1, 2, 3, 4, 5, 6, 7, 11, 34, 42, 48, 59, 63, 69, 71, 80, 85, 86, 88, 89, 90, 104, 105, 110, 150, 153, 155, 156},
-    # 2x2 Round Flat Tile (#14769) only in high-availability colors
     "tile_round_2x2":  {1, 2, 3, 4, 5, 6, 7, 11, 34, 42, 59, 63, 69, 85, 86, 88, 90, 110, 150, 156},
-    # 2x4 Flat Tile (#87079) & 1x3 Flat Tile (#63864) exclude Nougat (28)
     "tile_2x4":        {1, 2, 3, 4, 5, 6, 7, 11, 34, 36, 42, 48, 55, 59, 63, 69, 71, 80, 85, 86, 88, 89, 90, 104, 105, 110, 120, 150, 153, 155, 156},
     "tile_1x3":        {1, 2, 3, 4, 5, 6, 7, 11, 34, 36, 42, 48, 55, 59, 63, 69, 71, 80, 85, 86, 88, 89, 90, 104, 105, 110, 120, 150, 153, 155, 156},
-    # 1x1 Round Tile (#98138) & 1x1 Round Plate (#4073) exclude Nougat (28)
     "tile_round_1x1":  {1, 2, 3, 4, 5, 6, 7, 11, 34, 36, 42, 48, 55, 59, 63, 69, 71, 80, 85, 86, 88, 89, 90, 104, 105, 110, 120, 150, 153, 155, 156},
     "plate_round_1x1": {1, 2, 3, 4, 5, 6, 7, 11, 34, 36, 42, 48, 55, 59, 63, 69, 71, 80, 85, 86, 88, 89, 90, 104, 105, 110, 120, 150, 153, 155, 156},
 }
 
 
 def is_part_available(part_key: str, color_id: int) -> bool:
-    """Checks if a brick shape actually exists in the given official Color ID."""
     if part_key not in PART_COLOR_WHITELIST:
-        # Standard 1x1, 1x2, 1x4, 2x2, 2x3, 2x4 plates and 1x1, 1x2, 2x2 tiles exist in all palette colors except Nougat (28) for some plates
         if color_id == 28 and part_key not in ("plate_1x1", "plate_1x2", "tile_1x1", "tile_1x2", "tile_2x2"):
             return False
         return True
@@ -113,24 +113,19 @@ def is_part_available(part_key: str, color_id: int) -> bool:
 
 
 def rgb2lab_numpy(rgb_norm: np.ndarray) -> np.ndarray:
-    """Pure NumPy conversion from normalized sRGB [0, 1] to CIE L*a*b*."""
     mask = rgb_norm > 0.04045
     rgb_lin = np.where(mask, ((rgb_norm + 0.055) / 1.055) ** 2.4, rgb_norm / 12.92)
-
     m = np.array([
         [0.4124564, 0.3575761, 0.1804375],
         [0.2126729, 0.7151522, 0.0721750],
         [0.0193339, 0.1191920, 0.9503041]
     ], dtype=np.float32)
     xyz = np.dot(rgb_lin, m.T)
-
     xyz_ref = np.array([0.95047, 1.00000, 1.08883], dtype=np.float32)
     xyz_norm = xyz / xyz_ref
-
     epsilon = 0.008856
     kappa = 903.3
     f = np.where(xyz_norm > epsilon, np.cbrt(xyz_norm), (kappa * xyz_norm + 16.0) / 116.0)
-
     L = 116.0 * f[..., 1] - 16.0
     a = 500.0 * (f[..., 0] - f[..., 1])
     b = 200.0 * (f[..., 1] - f[..., 2])
@@ -138,7 +133,6 @@ def rgb2lab_numpy(rgb_norm: np.ndarray) -> np.ndarray:
 
 
 def sobel_edges_numpy(img_rgb_norm: np.ndarray) -> np.ndarray:
-    """Pure NumPy Sobel edge detector."""
     gray = 0.2126 * img_rgb_norm[..., 0] + 0.7152 * img_rgb_norm[..., 1] + 0.0722 * img_rgb_norm[..., 2]
     p = np.pad(gray, pad_width=1, mode="edge")
     gx = (p[:-2, 2:] + 2.0 * p[1:-1, 2:] + p[2:, 2:]) - (p[:-2, :-2] + 2.0 * p[1:-1, :-2] + p[2:, :-2])
@@ -158,16 +152,11 @@ def auto_detect_grid_size(img_cropped: Image.Image) -> tuple[int, int]:
     sample = img_cropped.resize((256, 256), Image.Resampling.BILINEAR)
     arr = np.asarray(sample, dtype=np.float32) / 255.0
     edge_energy = float(np.mean(sobel_edges_numpy(arr)))
-
     if edge_energy < 0.12:
-        chosen = (64, 64)
+        return (64, 64)
     elif edge_energy < 0.22:
-        chosen = (96, 96)
-    else:
-        chosen = (128, 128)
-
-    print(f"[Auto-Scale] Measured detail score: {edge_energy:.3f} -> Selected {chosen[0]}x{chosen[1]} stud grid.")
-    return chosen
+        return (96, 96)
+    return (128, 128)
 
 
 def clamp_rgb(rgb: tuple[int, int, int], delta: int) -> tuple[int, int, int]:
@@ -178,13 +167,8 @@ def denoise_and_smooth_grid(
     nearest_indices: np.ndarray,
     delta_e: np.ndarray,
     edge_map: np.ndarray,
-    merge_tolerance_de: float = 4.2
+    merge_tolerance_de: float = 2.2
 ) -> np.ndarray:
-    """
-    Replaces isolated noisy single pixels with their dominant neighbor color
-    IF the perceptual Delta-E penalty is small (< merge_tolerance_de) and not on a sharp feature.
-    Dramatically increases how many 2x4, 2x2, 1x4, and 1x2 pieces can be combined.
-    """
     smoothed = nearest_indices.copy()
     h, w = smoothed.shape
     edge_cutoff = np.quantile(edge_map, 0.75)
@@ -192,8 +176,7 @@ def denoise_and_smooth_grid(
     for r in range(1, h - 1):
         for c in range(1, w - 1):
             if edge_map[r, c] > edge_cutoff:
-                continue  # Keep sharp eyes/outlines untouched
-
+                continue
             center_color = smoothed[r, c]
             neighbors = [
                 smoothed[r - 1, c], smoothed[r + 1, c],
@@ -206,7 +189,6 @@ def denoise_and_smooth_grid(
                     candidate_de = delta_e[r, c, most_common_color]
                     if (candidate_de - current_de) <= merge_tolerance_de:
                         smoothed[r, c] = most_common_color
-
     return smoothed
 
 
@@ -215,157 +197,17 @@ def detect_subpixel_orientation(
     fg_lab: np.ndarray,
     bg_lab: np.ndarray
 ) -> tuple[str | None, float]:
-    """
-    Compares a 2x2 sub-pixel block against the 4 rotations of a Quarter-Circle tile
-    (TL, TR, BL, BR) to see if a curved tile is more accurate than a flat square.
-    """
-    # Distance of each of the 4 sub-pixels (top-left, top-right, bottom-left, bottom-right) to FG and BG
-    d_fg = np.linalg.norm(sub_cell_lab - fg_lab, axis=-1)  # shape (2, 2)
-    d_bg = np.linalg.norm(sub_cell_lab - bg_lab, axis=-1)  # shape (2, 2)
-
+    d_fg = np.linalg.norm(sub_cell_lab - fg_lab, axis=-1)
+    d_bg = np.linalg.norm(sub_cell_lab - bg_lab, axis=-1)
     solid_fg_err = float(np.sum(d_fg))
-
-    # Each orientation leaves 1 corner exposed to background (bg) and 3 quadrants covered by the curve (fg)
     orientations = {
-        "BR": d_bg[0, 0] + d_fg[0, 1] + d_fg[1, 0] + d_fg[1, 1],  # Flat corner at Bottom-Right, curve opens Top-Left
-        "BL": d_fg[0, 0] + d_bg[0, 1] + d_fg[1, 0] + d_fg[1, 1],  # Exposed top-right
-        "TR": d_fg[0, 0] + d_fg[0, 1] + d_bg[1, 0] + d_fg[1, 1],  # Exposed bottom-left
-        "TL": d_fg[0, 0] + d_fg[0, 1] + d_fg[1, 0] + d_bg[1, 1],  # Exposed bottom-right
+        "BR": d_bg[0, 0] + d_fg[0, 1] + d_fg[1, 0] + d_fg[1, 1],
+        "BL": d_fg[0, 0] + d_bg[0, 1] + d_fg[1, 0] + d_fg[1, 1],
+        "TR": d_fg[0, 0] + d_fg[0, 1] + d_bg[1, 0] + d_fg[1, 1],
+        "TL": d_fg[0, 0] + d_fg[0, 1] + d_fg[1, 0] + d_bg[1, 1],
     }
-
     best_orient, best_err = min(orientations.items(), key=lambda x: x[1])
-    improvement = solid_fg_err - float(best_err)
-    return best_orient, improvement
-
-
-# --- START OF CHANGE 2 ---
-def pack_multi_shape_mosaic(
-    nearest_indices: np.ndarray,
-    stud_mask: np.ndarray,
-    edge_map: np.ndarray,
-    subpixel_lab: np.ndarray,
-    palette_lab: np.ndarray,
-    palette_keys: list[tuple[int, str]]
-) -> list[dict]:
-    h, w = nearest_indices.shape
-    visited = np.zeros((h, w), dtype=bool)
-    placements = []
-
-    plate_shapes = [
-        (2, 4, "plate_2x4"), (4, 2, "plate_2x4"),
-        (2, 3, "plate_2x3"), (3, 2, "plate_2x3"),
-        (2, 2, "plate_2x2"),
-        (1, 4, "plate_1x4"), (4, 1, "plate_1x4"),
-        (1, 3, "plate_1x3"), (3, 1, "plate_1x3"),
-        (1, 2, "plate_1x2"), (2, 1, "plate_1x2"),
-    ]
-    tile_shapes = [
-        (2, 4, "tile_2x4"), (4, 2, "tile_2x4"),
-        (2, 2, "tile_2x2"),
-        (1, 4, "tile_1x4"), (4, 1, "tile_1x4"),
-        (1, 3, "tile_1x3"), (3, 1, "tile_1x3"),
-        (1, 2, "tile_1x2"), (2, 1, "tile_1x2"),
-    ]
-# --- START OF CHANGE 2 IN mosaic_engine.py ---
-    high_edge_thresh = np.quantile(edge_map, 0.68)
-    med_edge_thresh = np.quantile(edge_map, 0.50)
-
-    # Pass 1: Multi-size rectangular plates and tiles
-    for r in range(h):
-        for c in range(w):
-            if visited[r, c] or edge_map[r, c] > high_edge_thresh:
-                continue
-            color_idx = int(nearest_indices[r, c])
-            color_id = palette_keys[color_idx][0]
-            is_stud = bool(stud_mask[r, c])
-            shapes = plate_shapes if is_stud else tile_shapes
-
-            for sh, sw, part_key in shapes:
-                if not is_part_available(part_key, color_id):
-                    continue
-                if r + sh <= h and c + sw <= w:
-                    reg_vis = visited[r:r + sh, c:c + sw]
-                    reg_col = nearest_indices[r:r + sh, c:c + sw]
-                    reg_stud = stud_mask[r:r + sh, c:c + sw]
-                    if (not np.any(reg_vis)
-                            and np.all(reg_col == color_idx)
-                            and np.all(reg_stud == is_stud)):
-                        final_key = part_key
-                        shape_type = "rect"
-                        if (part_key == "tile_2x2"
-                                and is_part_available("tile_round_2x2", color_id)
-                                and np.mean(edge_map[r:r + 2, c:c + 2]) > med_edge_thresh):
-                            final_key = "tile_round_2x2"
-                            shape_type = "round_2x2"
-                        visited[r:r + sh, c:c + sw] = True
-                        placements.append({
-                            "r": r, "c": c, "h": sh, "w": sw,
-                            "color_idx": color_idx,
-                            "bg_color_idx": color_idx,
-                            "part_key": final_key,
-                            "is_stud": is_stud,
-                            "shape": shape_type,
-                            "orient": None
-                        })
-                        break
-
-    # Pass 2: Remaining 1x1 detail cells
-# --- END OF CHANGE 2 IN mosaic_engine.py ---
-
-    for r in range(h):
-        for c in range(w):
-            if visited[r, c]:
-                continue
-            visited[r, c] = True
-            color_idx = int(nearest_indices[r, c])
-            color_id = palette_keys[color_idx][0]
-            is_stud = bool(stud_mask[r, c])
-            sub_lab = subpixel_lab[r * 2:(r + 1) * 2, c * 2:(c + 1) * 2]
-
-            neighbors = []
-            for nr, nc in [(r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)]:
-                if 0 <= nr < h and 0 <= nc < w and nearest_indices[nr, nc] != color_idx:
-                    neighbors.append(int(nearest_indices[nr, nc]))
-
-            placed_curve = False
-            if neighbors and is_part_available("tile_qtr_1x1", color_id):
-                bg_color_idx = Counter(neighbors).most_common(1)[0][0]
-                orient, improvement = detect_subpixel_orientation(
-                    sub_lab, palette_lab[color_idx], palette_lab[bg_color_idx]
-                )
-                if improvement > 8.5:
-                    placements.append({
-                        "r": r, "c": c, "h": 1, "w": 1,
-                        "color_idx": color_idx,
-                        "bg_color_idx": bg_color_idx,
-                        "part_key": "tile_qtr_1x1",
-                        "is_stud": False,
-                        "shape": "qtr_1x1",
-                        "orient": orient
-                    })
-                    placed_curve = True
-
-            if not placed_curve:
-                want_round = edge_map[r, c] > high_edge_thresh
-                if is_stud:
-                    can_round = want_round and is_part_available("plate_round_1x1", color_id)
-                    part_key = "plate_round_1x1" if can_round else "plate_1x1"
-                else:
-                    can_round = want_round and is_part_available("tile_round_1x1", color_id)
-                    part_key = "tile_round_1x1" if can_round else "tile_1x1"
-
-                placements.append({
-                    "r": r, "c": c, "h": 1, "w": 1,
-                    "color_idx": color_idx,
-                    "bg_color_idx": color_idx,
-                    "part_key": part_key,
-                    "is_stud": is_stud,
-                    "shape": "round_1x1" if can_round else "rect",
-                    "orient": None
-                })
-
-    return placements
-# --- END OF CHANGE 2 ---
+    return best_orient, solid_fg_err - float(best_err)
 
 
 def draw_quarter_tile(
@@ -376,13 +218,9 @@ def draw_quarter_tile(
     orient: str,
     seam: tuple[int, int, int]
 ):
-    """Draws an accurate 1x1 Quarter-Circle tile (Part #25269) with exposed corner background."""
-    # Fill underlying corner with the neighboring background color
     draw.rectangle([x0, y0, x1, y1], fill=bg_color, outline=seam, width=1)
     w = x1 - x0
     h = y1 - y0
-
-    # Draw the 90-degree pie slice anchored at the flat corner
     if orient == "BR":
         bbox = [x0, y0, x0 + 2 * w, y0 + 2 * h]
         draw.pieslice(bbox, start=180, end=270, fill=fg_color, outline=seam)
@@ -392,24 +230,21 @@ def draw_quarter_tile(
     elif orient == "TR":
         bbox = [x0, y1 - 2 * h, x0 + 2 * w, y1]
         draw.pieslice(bbox, start=90, end=180, fill=fg_color, outline=seam)
-    else:  # "TL"
+    else:
         bbox = [x1 - 2 * w, y1 - 2 * h, x1, y1]
         draw.pieslice(bbox, start=0, end=90, fill=fg_color, outline=seam)
 
 
-# --- START OF COMBINED CHANGE IN mosaic_engine.py ---
 def extract_neural_foreground_mask(img_pil: Image.Image) -> np.ndarray | None:
     """
-     Isolates the true foreground subject by comparing every pixel against the outer
-    border color distribution in CIELAB space — WITHOUT any circular radial spotlight
-    that would falsely elevate the background!
+    Isolates the foreground subject by comparing every pixel against the outer
+    border color distribution in CIELAB space (no circular halo).
     """
     work_img = img_pil.resize((256, 256), Image.Resampling.BILINEAR).convert("RGB")
     rgb_norm = np.asarray(work_img, dtype=np.float32) / 255.0
     lab = rgb2lab_numpy(rgb_norm)
     h, w, _ = lab.shape
 
-    # Sample the outer 8-pixel perimeter to learn the true background color(s)
     b_pad = 8
     border_pixels = np.concatenate([
         lab[:b_pad, :, :].reshape(-1, 3),
@@ -418,28 +253,23 @@ def extract_neural_foreground_mask(img_pil: Image.Image) -> np.ndarray | None:
         lab[:, -b_pad:, :].reshape(-1, 3),
     ], axis=0)
 
-    # Cluster border into 4 reference background colors
     step = max(1, len(border_pixels) // 4)
     bg_refs = [np.median(border_pixels[i * step:(i + 1) * step], axis=0) for i in range(4)]
     bg_dists = [np.linalg.norm(lab - ref[np.newaxis, np.newaxis, :], axis=-1) for ref in bg_refs]
     min_bg_dist = np.min(np.stack(bg_dists, axis=-1), axis=-1)
 
-    # Measure natural noise in the background border
     border_noise = float(np.percentile(
         np.min(np.stack([np.linalg.norm(border_pixels - r[None, :], axis=-1) for r in bg_refs], axis=-1), axis=-1),
         90
     ))
 
-    # A pixel is foreground ONLY if its color is genuinely distinct from the border background
     cutoff = max(14.0, border_noise * 2.5)
     raw_mask = min_bg_dist > cutoff
 
-    # Clean tiny pinholes without creating any circular halo
     mask_img = Image.fromarray((raw_mask.astype(np.uint8) * 255), mode="L")
     mask_img = mask_img.filter(ImageFilter.MedianFilter(size=5))
     fg_mask = np.asarray(mask_img) > 127
 
-    # Never allow the outer 1-stud frame to be marked as elevated foreground
     fg_mask[0, :] = False
     fg_mask[-1, :] = False
     fg_mask[:, 0] = False
@@ -481,8 +311,8 @@ def detect_boxed_grooves_and_preserve_lines(
     grid_size: tuple[int, int]
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Detects only sharp, distinct dark contour lines (like the boxed outlines of 'RE-GO')
-    at 512x512 BEFORE downsampling so thin outlines stay 1-stud wide and crisp.
+    Detects thin dark outlines and letter borders (like 'RE-GO') at 512x512 BEFORE
+    downsampling so letter strokes stay 1-stud wide and never wash out.
     """
     gh, gw = grid_size
     factor = max(2, 512 // max(gh, gw))
@@ -493,7 +323,7 @@ def detect_boxed_grooves_and_preserve_lines(
 
     gray_u8 = np.clip(hi_gray * 255.0, 0, 255).astype(np.uint8)
     dilated_u8 = np.asarray(
-        Image.fromarray(gray_u8, mode="L").filter(ImageFilter.MaxFilter(size=3)),
+        Image.fromarray(gray_u8, mode="L").filter(ImageFilter.MaxFilter(size=max(3, factor | 1))),
         dtype=np.float32
     )
     valley_hi = (dilated_u8 - gray_u8.astype(np.float32)) / 255.0
@@ -501,16 +331,17 @@ def detect_boxed_grooves_and_preserve_lines(
     valley_blocks = valley_hi.reshape(gh, factor, gw, factor)
     max_valley = np.max(valley_blocks, axis=(1, 3))
 
-    # Strict threshold so only real dark ink outlines / grooves trigger (never flat surfaces)
-    groove_thresh = max(0.11, float(np.quantile(max_valley, 0.90)))
+    active_valleys = max_valley[max_valley > 0.04]
+    dyn_thresh = float(np.quantile(active_valleys, 0.50)) if len(active_valleys) > 0 else 0.075
+    groove_thresh = max(0.065, min(0.13, dyn_thresh))
     groove_mask = max_valley >= groove_thresh
 
     rgb_blocks = hi_rgb.reshape(gh, factor, gw, factor, 3).transpose(0, 2, 1, 3, 4).reshape(gh, gw, factor * factor, 3)
     luma_blocks = 0.2126 * rgb_blocks[..., 0] + 0.7152 * rgb_blocks[..., 1] + 0.0722 * rgb_blocks[..., 2]
-    dark_idx = np.argsort(luma_blocks, axis=-1)[:, :, :max(1, (factor * factor) // 6)]
+    dark_idx = np.argsort(luma_blocks, axis=-1)[:, :, :1]
     row_idx = np.arange(gh)[:, None, None]
     col_idx = np.arange(gw)[None, :, None]
-    dark_sub_rgb = np.mean(rgb_blocks[row_idx, col_idx, dark_idx], axis=2)
+    dark_sub_rgb = np.clip(np.mean(rgb_blocks[row_idx, col_idx, dark_idx], axis=2) * 0.55, 0.0, 1.0)
 
     return groove_mask, dark_sub_rgb
 
@@ -525,9 +356,9 @@ def compute_stable_terrace_z_grid(
     groove_mask: np.ndarray | None = None
 ) -> np.ndarray:
     """
-    Crisp Lettering 3D Layer Allocator:
-    - Layer 1: Background & Letter Grooves / Outlines (carved deep down so words are readable).
-    - Layer z_layers (Top): Main foreground subject & letter faces (solid flat plateau).
+    Crisp Lettering & Subject 3D Layer Allocator:
+    - Layer 1: Outer background AND carved letter outlines (`groove_mask`).
+    - Layer z_layers (Top): Raised subject body and boxed letter faces ('RE-GO').
     """
     h, w = grid_size
     if z_layers <= 1:
@@ -564,10 +395,10 @@ def compute_stable_terrace_z_grid(
     if not np.any(is_subject):
         return z_grid
 
-    # Elevate subject to top plateau
+    # Elevate the subject and letter faces to the top plateau
     z_grid[is_subject] = z_layers
 
-    # Carve letter outlines and internal grooves ALL THE WAY DOWN to Z=1 so words stand out cleanly!
+    # Carve letter outlines and internal box grooves down to Z=1 so letters stand out clearly
     if groove_mask is not None:
         z_grid[is_subject & groove_mask] = 1
 
@@ -583,16 +414,8 @@ def build_interlocking_layers(
     palette_keys: list[tuple[int, str]],
     z_grid: np.ndarray,
     groove_mask: np.ndarray | None = None,
-    filler_color_id: int = 86  # 86 = Light Bluish Gray structural bricks & plates
+    filler_color_id: int = 86
 ) -> tuple[list[dict], list[dict]]:
-    """
-    Packs 2D and 3D mosaics with 3-Plate = 1-Brick vertical optimization AND 90-degree seam interlocking:
-    - Where z_grid == 4: Layers Z=1..3 merge into a single 3-plate-tall structural Brick (z_span=3),
-      and the top surface at Z=4 packs rotated 90 degrees across the brick seams.
-    - Where z_grid == 3 and stud_mask is True: Layers Z=1..3 merge into a single 3-plate-tall
-      surface-colored Brick (z_span=3) anchored directly to the baseplate.
-    - All other layers pack with 90-degree alternating cross-seam plates/tiles.
-    """
     h, w = nearest_indices.shape
     max_z = int(np.max(z_grid))
     filler_idx = next((idx for idx, (cid, _) in enumerate(palette_keys) if cid == filler_color_id), 0)
@@ -623,16 +446,12 @@ def build_interlocking_layers(
     surface_placements: list[dict] = []
     under_placements: list[dict] = []
 
-    # Track which (z, r, c) stud-voxels are already occupied by a 3-plate-tall Brick
     occupied = np.zeros((max_z + 1, h, w), dtype=bool)
     seam_grids = np.zeros((max_z + 1, h, w), dtype=np.int32)
     uid = 1
 
-    # ==========================================================================
-    # PASS 0: 3-PLATE = 1-BRICK VERTICAL + HORIZONTAL MERGE (WHEN MAX_Z >= 3)
-    # ==========================================================================
+    # PASS 0: 3-Plate = 1-Brick Vertical Substitution (when max_z >= 3)
     if max_z >= 3:
-        # 0A. Where z_grid >= 4, pack 3-plate-tall low-cost Filler Bricks spanning Z=1..3
         brick_under_mask = (z_grid >= 4)
         bu_visited = ~brick_under_mask
         for r in range(h):
@@ -665,7 +484,6 @@ def build_interlocking_layers(
                     "is_structural": True,
                 })
 
-        # 0B. Where z_grid == 3 AND stud_mask is True (not a groove), pack 1-piece Surface Bricks spanning Z=1..3
         no_groove = (~groove_mask) if groove_mask is not None else np.ones((h, w), dtype=bool)
         surf_brick_mask = (z_grid == 3) & stud_mask & no_groove & (~occupied[3])
         sb_visited = ~surf_brick_mask
@@ -688,7 +506,7 @@ def build_interlocking_layers(
                 sh, sw, p_key = best_shape
                 b_key = PLATE_TO_BRICK_KEY[p_key]
                 if not is_part_available(b_key, color_id):
-                    continue  # Fallback to standard plates if color is not made in full bricks
+                    continue
                 sb_visited[r:r + sh, c:c + sw] = True
                 occupied[1:4, r:r + sh, c:c + sw] = True
                 uid += 1
@@ -705,9 +523,7 @@ def build_interlocking_layers(
                     "is_structural": False,
                 })
 
-    # ==========================================================================
-    # PASS 1..MAX_Z: PACK REMAINING PLATES & TILES WITH 90° SEAM INTERLOCKING
-    # ==========================================================================
+    # PASS 1..MAX_Z: Pack remaining plates & flat tiles with 90° cross-seam interlocking
     for lz in range(1, max_z + 1):
         prev_seam_grid = seam_grids[lz - 1]
         curr_seam_grid = seam_grids[lz].copy()
@@ -715,7 +531,6 @@ def build_interlocking_layers(
         plate_order = horiz_First if odd_layer else vert_First
         tile_order = horiz_Tiles if odd_layer else vert_Tiles
 
-        # 1. Pack structural studded under-plates for remaining unoccupied cells where z_grid > lz
         struct_visited = (~(z_grid > lz)) | occupied[lz]
         for r in range(h):
             for c in range(w):
@@ -751,7 +566,6 @@ def build_interlocking_layers(
                     "is_structural": True,
                 })
 
-        # 2. Pack visible surface plates & flat tiles for unoccupied cells where z_grid == lz
         surf_visited = (~(z_grid == lz)) | occupied[lz]
         for r in range(h):
             for c in range(w):
@@ -804,7 +618,6 @@ def build_interlocking_layers(
                         "is_structural": False,
                     })
 
-        # 3. Remaining 1x1 detail & contour groove cells on Layer lz
         for r in range(h):
             for c in range(w):
                 if surf_visited[r, c]:
@@ -997,9 +810,6 @@ def _draw_iso_brick(
     is_new_step: bool = False,
     z_span: int = 1
 ):
-    """
-    Draws a 3D isometric Plate/Tile (`z_span=1`) or full 3-plate-tall Brick (`z_span=3`).
-    """
     def proj(row: float, col: float, layer_z: float) -> tuple[float, float]:
         return (origin_x + (col - row) * u_x, origin_y + (col + row) * u_y - layer_z * z_px)
 
@@ -1045,7 +855,6 @@ def _draw_iso_brick(
 
 
 def _get_manual_font(size: int = 16):
-    from PIL import ImageFont
     try:
         return ImageFont.load_default(size=size)
     except TypeError:
@@ -1069,7 +878,6 @@ def generate_isometric_manual(
     font_step = _get_manual_font(28)
     font_small = _get_manual_font(13)
 
-    # Order steps by base level (z - z_span + 1) so 3-plate Bricks placed on the baseplate build in Step 1..2
     raw_batches: list[list[dict]] = []
     for base_z in range(1, max_z + 1):
         layer_pcs = [p for p in all_placements if (p.get("z", 1) - p.get("z_span", 1) + 1) == base_z]
@@ -1291,7 +1099,7 @@ def generate_isometric_manual(
     manual.save(output_manual_path, format="PNG")
     return output_manual_path
 
-# --- START OF TRUE-TONE COLOR CHANGE IN mosaic_engine.py ---
+
 def delta_e_ciede2000_numpy(lab1: np.ndarray, lab2: np.ndarray) -> np.ndarray:
     L1, a1, b1 = lab1[..., 0], lab1[..., 1], lab1[..., 2]
     L2, a2, b2 = lab2[..., 0], lab2[..., 1], lab2[..., 2]
@@ -1398,7 +1206,6 @@ def generate_brick_mosaic(
     else:
         if grid_size is None:
             grid_size = auto_detect_grid_size(img_cropped)
-        # In 3D mode, use the 4.7 MB u2netp neural mask to isolate the subject from any background
         if z_layers > 1:
             neural_mask_256 = extract_neural_foreground_mask(img_cropped)
             if neural_mask_256 is not None:
@@ -1407,7 +1214,6 @@ def generate_brick_mosaic(
                 )
                 fg_mask_grid = np.asarray(fg_mask_img) > 127
 
-    # Detect thin boxed letter outlines & structural grooves at 512x512 BEFORE downsampling
     groove_mask, dark_sub_rgb = detect_boxed_grooves_and_preserve_lines(img_cropped, grid_size)
 
     if pre_sharpen and not abstract_mode:
@@ -1429,13 +1235,17 @@ def generate_brick_mosaic(
     )
     raw_indices = np.argmin(delta_e, axis=-1)
 
-    # Preserve boxed letter outlines (e.g. 'RE-GO' internal lines) by matching the darkest sub-pixels on groove cells
+    # Force groove / letter outline cells to pick a genuinely darker contrasting brick color (e.g. Dark Red #59 or Black #11)
     dark_sub_lab = rgb2lab_numpy(dark_sub_rgb)
     dark_de = delta_e_ciede2000_numpy(
         dark_sub_lab[:, :, np.newaxis, :],
         palette_lab[np.newaxis, np.newaxis, :, :]
     )
-    dark_indices = np.argmin(dark_de, axis=-1)
+    # Penalize palette colors that are not at least 12 L* points darker than the surrounding surface color
+    surface_L = palette_lab[raw_indices, 0][..., np.newaxis]
+    cand_L = palette_lab[np.newaxis, np.newaxis, :, 0]
+    not_darker_penalty = np.where(cand_L > (surface_L - 12.0), 100.0, 0.0)
+    dark_indices = np.argmin(dark_de + not_darker_penalty, axis=-1)
     raw_indices = np.where(groove_mask, dark_indices, raw_indices)
 
     if abstract_mode and fg_mask_grid is not None:
@@ -1457,7 +1267,6 @@ def generate_brick_mosaic(
         raw_indices[:, -1] = black_idx
 
     edge_map = sobel_edges_numpy(img_rgb_norm)
-    # Boost edge_map on groove cells so denoise_and_smooth_grid never erases boxed letter outlines
     edge_map = np.where(groove_mask, np.max(edge_map) + 1.0, edge_map)
     nearest_indices = denoise_and_smooth_grid(
         raw_indices, delta_e, edge_map, merge_tolerance_de=merge_tolerance_de
@@ -1465,7 +1274,6 @@ def generate_brick_mosaic(
 
     effective_z = max(2, z_layers) if abstract_mode else z_layers
 
-    # 1. Compute Boxed-Subject 3D Elevation Map first
     z_grid = compute_stable_terrace_z_grid(
         img_lab=img_lab,
         edge_map=edge_map,
@@ -1476,14 +1284,15 @@ def generate_brick_mosaic(
         groove_mask=groove_mask,
     )
 
-   # Put tactile studs ONLY on the highest raised plateau; keep background & grooves smooth flat tiles
     if effective_z > 1:
         stud_mask = (z_grid == np.max(z_grid)) & (z_grid > 1) & (~groove_mask)
-        # Keep the background color 100% uniform (merges into big 2x4 flat tiles)
-        bg_mask = (z_grid == 1)
+        bg_mask = (z_grid == 1) & (~groove_mask)
         if np.any(bg_mask):
             dominant_bg_col = Counter(nearest_indices[bg_mask].tolist()).most_common(1)[0][0]
             nearest_indices = np.where(bg_mask, dominant_bg_col, nearest_indices)
+    else:
+        threshold = np.quantile(edge_map, 1.0 - stud_ratio)
+        stud_mask = (edge_map >= threshold) & (~groove_mask)
 
     if abstract_mode and fg_mask_grid is not None:
         stud_mask = stud_mask & fg_mask_grid
@@ -1492,7 +1301,6 @@ def generate_brick_mosaic(
         stud_mask[:, 0] = False
         stud_mask[:, -1] = False
 
-    # 3. Pack each layer from Z=1 to effective_z with 90-degree cross-seam interlocking
     surface_placements, under_placements = build_interlocking_layers(
         nearest_indices=nearest_indices,
         stud_mask=stud_mask,
@@ -1508,7 +1316,10 @@ def generate_brick_mosaic(
     mosaic_img.save(output_path, format="PNG")
 
     if manual_output_path is None:
-        manual_output_path = output_path.replace(".png", "_manual.png")
+        manual_output_path = output_path.replace("_hd.png", "_manual.png")
+        if manual_output_path == output_path:
+            manual_output_path = output_path + "_manual.png"
+
     generate_isometric_manual(
         surface_placements=surface_placements,
         under_placements=under_placements,
@@ -1532,31 +1343,26 @@ def generate_brick_mosaic(
 
     total_studs = int(np.sum(z_grid))
     return bom, grid_size, total_studs
-# --- END OF TRUE-TONE COLOR CHANGE IN mosaic_engine.py ---
+
 
 def export_bricklink_xml(
     bom: dict,
     xml_output_path: str,
     grid_size: tuple[int, int] | None = None,
     include_baseplates: bool = True,
-    baseplate_color_id: int = 85,  # 85 = Dark Bluish Gray (standard for 48x48 #4186), 11 = Black
-    condition: str = "N"           # "N" = New parts only, "U" = Used, or "" = Any condition
+    baseplate_color_id: int = 85,
+    condition: str = "N"
 ) -> str:
-    """
-    Exports the multi-shape Bill of Materials (BOM) into a valid BrickLink Wanted List XML file
-    AND returns the raw XML string (so you can also paste it into BrickLink's 'Upload BrickLink XML' box).
-    """
     lines = ["<INVENTORY>"]
 
-    # 1. Automatically include the physical baseplates needed to build the grid
     if include_baseplates and grid_size is not None:
         h, w = grid_size
         if h % 48 == 0 and w % 48 == 0:
-            bp_id = "4186"  # Official 48 x 48 Baseplate
+            bp_id = "4186"
             bp_qty = (h // 48) * (w // 48)
             bp_color = baseplate_color_id
         elif h % 32 == 0 and w % 32 == 0:
-            bp_id = "3811"  # Official 32 x 32 Baseplate
+            bp_id = "3811"
             bp_qty = (h // 32) * (w // 32)
             bp_color = 11 if baseplate_color_id == 85 else baseplate_color_id
         else:
@@ -1572,7 +1378,6 @@ def export_bricklink_xml(
                 lines.append(f"    <CONDITION>{condition}</CONDITION>")
             lines.append("  </ITEM>")
 
-    # 2. Add every multi-size plate, flat tile, round piece, and curved tile from the BOM
     for (color_id, color_name, part_id, part_name), count in bom.items():
         lines.append(f"  <!-- {count}x {color_name} {part_name} -->")
         lines.append("  <ITEM>")
@@ -1591,60 +1396,3 @@ def export_bricklink_xml(
         f.write(xml_content)
 
     return xml_content
-if __name__ == "__main__":
-    from tkinter import Tk, filedialog
-
-    root = Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-
-    print("Select a photo in the popup file browser...")
-    test_input = filedialog.askopenfilename(
-        title="Select a Photo for Your Brick Mosaic",
-        filetypes=[("Image Files", "*.png *.jpg *.jpeg *.webp *.bmp")]
-    )
-
-    if not test_input:
-        print("No photo selected. Exiting.")
-    else:
-        print("\n=== Select Mosaic Resolution Preset ===")
-        for key, (_, _, desc) in GRID_PRESETS.items():
-            print(f"  [{key}] {desc}")
-        choice = input("\nEnter preset number (1-6) [Default = 6 (Auto)]: ").strip() or "6"
-        preset_key, chosen_grid, _ = GRID_PRESETS.get(choice, GRID_PRESETS["6"])
-
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        photo_name = os.path.splitext(os.path.basename(test_input))[0]
-        test_output = os.path.join(script_dir, f"{photo_name}_optimized_{preset_key}.png")
-        xml_output = os.path.join(script_dir, f"{photo_name}_bricklink_{preset_key}.xml")
-
-        parts_list, final_grid, total_studs = generate_brick_mosaic(
-            input_path=test_input,
-            output_path=test_output,
-            grid_size=chosen_grid,
-            target_output_px=2400,
-            stud_ratio=0.45,
-            merge_tolerance_de=4.2,
-            pre_sharpen=True
-        )
-
-        # Export the BrickLink Wanted List XML
-        export_bricklink_xml(
-            bom=parts_list,
-            xml_output_path=xml_output,
-            grid_size=final_grid,
-            include_baseplates=True,
-            condition="N"  # "N" = New parts, or change to "" for Any condition (cheaper on BrickLink!)
-        )
-
-        total_pieces = sum(parts_list.values())
-        reduction_pct = (1.0 - (total_pieces / total_studs)) * 100.0
-
-        print(f"\nSaved {final_grid[0]}x{final_grid[1]} multi-shape mosaic PNG to:\n  {test_output}")
-        print(f"Saved BrickLink Wanted List XML to:\n  {xml_output}")
-        print(f"\n--- Part Optimizer Summary ---")
-        print(f"Grid Capacity : {total_studs} studs")
-        print(f"Physical Parts: {total_pieces} pcs ({reduction_pct:.1f}% fewer pieces used!)")
-        print(f"\n--- Top 25 Parts in Bill of Materials ---")
-        for (color_id, color_name, part_id, part_name), count in list(parts_list.items())[:25]:
-            print(f"Color {color_id:<3} ({color_name:<20}) | Part #{part_id:<5} {part_name:<34} : {count} pcs")

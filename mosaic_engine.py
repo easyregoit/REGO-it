@@ -1280,7 +1280,7 @@ def generate_isometric_manual(
     manual = Image.new("RGB", (page_w, page_h), (228, 240, 248))
     draw = ImageDraw.Draw(manual)
 
-   for idx, st in enumerate(steps):
+    for idx, st in enumerate(steps):
         step_num = st["step_num"]
         br, bc = st["bp_coord"]
         r0, r1, c0, c1 = st["bp_bounds"]

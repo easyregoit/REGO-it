@@ -1197,13 +1197,9 @@ def generate_isometric_manual(
     output_manual_path: str
 ) -> str:
     """
-    Baseplate-Isolated Progressive Isometric Manual:
-    - Isolates physical baseplates based on grid_size (e.g. 4x 32x32 baseplates for 64x64).
-    - Builds 1 baseplate at a time (Z=1 -> Z=2 -> Z=3, capped at <=55 pieces per step):
-      * Baseplate 1 Steps: Shows Baseplate 1 isolated at massive 2.5x zoom.
-      * Baseplate 2+ Steps: Shows the isolated active baseplate at 2.5x zoom on the main stage
-        PLUS the progressive multi-baseplate assembly (Baseplate 1 + Baseplate 2, then 1 + 2 + 3, etc.)
-        so builders see both every individual brick clearly and how the baseplates connect!
+    Baseplate-Isolated Isometric Manual (Single Board Per Step):
+    - Builds 1 isolated baseplate module at a time (Z=1 -> Z=2 -> Z=3), centered
+      in the step panel with no extra total-progress board on the right.
     """
     h, w = grid_size
     bp_h, bp_w = get_baseplate_module_size(grid_size)
@@ -1217,13 +1213,10 @@ def generate_isometric_manual(
     font_step = _get_manual_font(30)
     font_small = _get_manual_font(13)
 
-    # Order baseplates in natural assembly sequence: (0,0) -> (0,1) -> (1,0) -> (1,1)...
     bp_coords = [(br, bc) for br in range(bp_rows) for bc in range(bp_cols)]
 
-    # Build steps baseplate-by-baseplate, then layer-by-layer (capped at <= 55 pieces per step)
     MAX_PCS_PER_STEP = 55
     steps = []
-    global_accumulated: list[dict] = []
     introduced_bps: list[tuple[int, int]] = []
     step_num = 0
 
@@ -1246,7 +1239,6 @@ def generate_isometric_manual(
             if not layer_bp_pcs:
                 continue
 
-            # Sort structural plates first, then back-to-front along isometric diagonal
             layer_bp_pcs.sort(key=lambda p: (0 if p.get("is_structural", False) else 1, p["r"] + p["c"], p["r"], p["c"]))
 
             num_chunks = max(1, (len(layer_bp_pcs) + MAX_PCS_PER_STEP - 1) // MAX_PCS_PER_STEP)
@@ -1262,11 +1254,9 @@ def generate_isometric_manual(
                     "bp_bounds": (r0, r1, c0, c1),
                     "introduced_bps": list(introduced_bps),
                     "bp_prior_pcs": list(bp_prior_pcs),
-                    "global_prior_pcs": list(global_accumulated),
                     "active_pcs": batch,
                 })
                 bp_prior_pcs.extend(batch)
-                global_accumulated.extend(batch)
 
     cols = 2
     rows = (len(steps) + cols - 1) // cols
@@ -1286,7 +1276,6 @@ def generate_isometric_manual(
         r0, r1, c0, c1 = st["bp_bounds"]
         intro_bps = st["introduced_bps"]
         bp_prior = st["bp_prior_pcs"]
-        global_prior = st["global_prior_pcs"]
         active_pcs = st["active_pcs"]
 
         row_idx = idx // cols
@@ -1309,10 +1298,9 @@ def generate_isometric_manual(
             width=2
         )
 
-        # Step number below the callout box
         draw.text((box_x0 + 8, box_y1 + 16), f"{step_num}", fill=(25, 32, 42), font=font_step)
 
-        # Wordless Mini Baseplate Quadrant Locator Icon (bottom-left next to step number)
+        # Small 2x2 quadrant indicator next to the step number showing which baseplate this is
         if bp_rows > 1 or bp_cols > 1:
             loc_cell = 14
             loc_x0 = box_x0 + 86
@@ -1358,17 +1346,16 @@ def generate_isometric_manual(
             )
             draw.text((cell_x + 70, cell_y + 8), f"{qty}x", fill=(20, 24, 30), font=font_qty)
 
-        # 2. Main Stage: Isolated Active Baseplate at 2.5x Zoom
-        has_assembly_inset = len(intro_bps) > 1
-        main_vp_x0 = px0 + 324
-        main_vp_y0 = py0 + 24
-        main_vp_x1 = (px1 - 270) if has_assembly_inset else (px1 - 24)
-        main_vp_y1 = py1 - 24
+        # 2. Main Stage: Single Isolated Active Baseplate Centered in Full Right Area
+        main_vp_x0 = px0 + 328
+        main_vp_y0 = py0 + 28
+        main_vp_x1 = px1 - 28
+        main_vp_y1 = py1 - 28
 
         iso_ox, iso_oy, u_x, u_y, z_px = _compute_iso_viewport_transform(
             r0, r1, c0, c1, max_z,
             main_vp_x0, main_vp_y0, main_vp_x1, main_vp_y1,
-            max_ux=13.5
+            max_ux=10.5
         )
 
         _draw_iso_baseplate_tile(
@@ -1401,63 +1388,6 @@ def generate_isometric_manual(
                 shape=p.get("shape", "rect"),
                 orient=p.get("orient")
             )
-
-        # 3. Progressive Multi-Baseplate Assembly View (Baseplate 1 + 2, then 1 + 2 + 3...)
-        if has_assembly_inset:
-            ins_x0, ins_y0 = px1 - 258, py0 + 24
-            ins_x1, ins_y1 = px1 - 20, py1 - 24
-            draw.rounded_rectangle(
-                [ins_x0, ins_y0, ins_x1, ins_y1],
-                radius=10,
-                fill=(236, 244, 250),
-                outline=(176, 196, 214),
-                width=2
-            )
-
-            min_ir = min(ibr * bp_h for ibr, _ in intro_bps)
-            max_ir = max(min(h, (ibr + 1) * bp_h) for ibr, _ in intro_bps)
-            min_ic = min(ibc * bp_w for _, ibc in intro_bps)
-            max_ic = max(min(w, (ibc + 1) * bp_w) for _, ibc in intro_bps)
-
-            a_ox, a_oy, a_ux, a_uy, a_zpx = _compute_iso_viewport_transform(
-                min_ir, max_ir, min_ic, max_ic, max_z,
-                ins_x0 + 10, ins_y0 + 16, ins_x1 - 10, ins_y1 - 16,
-                max_ux=6.2
-            )
-
-            # Draw only the baseplates introduced so far ( highlighting the current one in gold )
-            for ibr, ibc in sorted(intro_bps, key=lambda item: (item[0] + item[1], item[0], item[1])):
-                ir0, ir1 = ibr * bp_h, min(h, (ibr + 1) * bp_h)
-                ic0, ic1 = ibc * bp_w, min(w, (ibc + 1) * bp_w)
-                _draw_iso_baseplate_tile(
-                    draw, ir0, ir1, ic0, ic1,
-                    a_ox, a_oy, a_ux, a_uy, a_zpx,
-                    is_active_bp=(ibr == br and ibc == bc)
-                )
-
-            combined_global = [(False, p) for p in global_prior] + [(True, p) for p in active_pcs]
-            combined_global.sort(
-                key=lambda item: (
-                    item[1].get("z", 1),
-                    item[1]["r"] + item[1]["c"],
-                    item[1]["r"],
-                    item[1]["c"]
-                )
-            )
-            for is_new, p in combined_global:
-                rgb = tuple(int(v) for v in palette_rgb[p["color_idx"]])
-                _draw_iso_brick(
-                    draw,
-                    r=p["r"], c=p["c"], h=p["h"], w=p["w"], z=p.get("z", 1),
-                    color_rgb=rgb,
-                    is_stud=p["is_stud"],
-                    origin_x=a_ox, origin_y=a_oy,
-                    u_x=a_ux, u_y=a_uy, z_px=a_zpx,
-                    is_new_step=is_new,
-                    z_span=p.get("z_span", 1),
-                    shape=p.get("shape", "rect"),
-                    orient=p.get("orient")
-                )
 
     # Bottom Section: 2D Color Key & Full Baseplate-Divided Quadrant Map
     map_y0 = iso_section_h
@@ -1572,7 +1502,6 @@ def generate_isometric_manual(
         ty = (y0 + y1) // 2 - 6
         draw.text((tx, ty), label_str, fill=txt_col, font=font_small)
 
-    # Draw Baseplate Module Seams in bold gold/red
     quad_line_col = (220, 38, 38)
     for r_q in range(bp_h, h, bp_h):
         qy = gy0 + r_q * cell_px

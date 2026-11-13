@@ -50,60 +50,21 @@ def make_peek_preview(img_path: str, blur_radius: int = 16) -> str:
     return f"data:image/png;base64,{b64}"
 
 
-@app.get("/")
-def serve_home():
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    index_path = os.path.join(script_dir, "index.html")
-    if os.path.exists(index_path):
-        return FileResponse(index_path)
-    return {"status": "REGO Mosaic Studio Python API v3 (Demo + Isometric Manual + 3D Layers) is running"}
-
-
-@app.get("/api/demo-image")
-def get_demo_image():
-    """Returns the built-in RE-GO demo PNG so the frontend can load it with 1 click."""
-    demo_path = os.path.join(ORDERS_DIR, "builtin_demo.png")
-    create_demo_image(demo_path)
-    return FileResponse(demo_path, media_type="image/png", filename="rego_demo.png")
-
-
-@app.post("/api/generate")
-async def create_mosaic(
-    file: UploadFile | None = File(default=None),
-    preset: str = Form("auto"),
-    stud_ratio: float = Form(0.45),
-    merge_tolerance: float = Form(2.2),
-    z_layers: int = Form(1),
-    z_mode: str = Form("luminance"),
-    abstract_mode: bool = Form(False),
-    use_demo: bool = Form(False),
-):
-    safe_z = max(1, min(4, int(z_layers)))
-
-    if use_demo or file is None:
-        demo_tmp = os.path.join(ORDERS_DIR, "builtin_demo.png")
-        create_demo_image(demo_tmp)
-        with open(demo_tmp, "rb") as df:
-            file_bytes = df.read()
-    else:
-        file_bytes = await file.read()
-
-    sig = (
-        file_bytes[:4096]
-        + str(len(file_bytes)).encode()
-        + f"_{preset}_{stud_ratio}_z{safe_z}_{z_mode}_abs{abstract_mode}".encode()
-    )
-    order_id = hashlib.md5(sig).hexdigest()[:12]
-
-    input_path = os.path.join(ORDERS_DIR, f"{order_id}_in.png")
+def _build_mosaic_payload(
+    input_path: str,
+    order_id: str,
+    grid_size: tuple[int, int] | None,
+    stud_ratio: float,
+    merge_tolerance: float,
+    safe_z: int,
+    z_mode: str,
+    abstract_mode: bool,
+    is_demo: bool = False,
+) -> dict:
     output_png = os.path.join(ORDERS_DIR, f"{order_id}_hd.png")
     output_manual = os.path.join(ORDERS_DIR, f"{order_id}_manual.png")
     output_xml = os.path.join(ORDERS_DIR, f"{order_id}_parts.xml")
 
-    with open(input_path, "wb") as f:
-        f.write(file_bytes)
-
-    grid_size = (32, 32) if abstract_mode else PRESET_MAP.get(preset, None)
     bom, final_grid, total_studs = generate_brick_mosaic(
         input_path=input_path,
         output_path=output_png,
@@ -126,16 +87,13 @@ async def create_mosaic(
         condition="N",
     )
 
-    if os.path.exists(input_path):
-        os.remove(input_path)
-
     with open(output_png, "rb") as img_f:
         hd_b64 = f"data:image/png;base64,{base64.b64encode(img_f.read()).decode('utf-8')}"
 
     with open(output_manual, "rb") as man_f:
         manual_b64 = f"data:image/png;base64,{base64.b64encode(man_f.read()).decode('utf-8')}"
 
-    peek_b64 = make_peek_preview(output_png, blur_radius=16)
+    peek_b64 = hd_b64 if is_demo else make_peek_preview(output_png, blur_radius=16)
     total_pieces = sum(bom.values())
     reduction_pct = round((1.0 - (total_pieces / max(1, total_studs))) * 100.0, 1)
     is_3d = safe_z > 1 or abstract_mode
@@ -160,6 +118,7 @@ async def create_mosaic(
 
     return {
         "order_id": order_id,
+        "is_demo": is_demo,
         "grid": f"{final_grid[0]}x{final_grid[1]} Frame" if abstract_mode else (f"{final_grid[0]}x{final_grid[1]}x{safe_z}" if is_3d else f"{final_grid[0]}x{final_grid[1]}"),
         "is_3d": is_3d,
         "abstract_mode": abstract_mode,
@@ -175,6 +134,97 @@ async def create_mosaic(
         "top_parts": parts_summary,
         "parts_breakdown": parts_summary,
     }
+
+
+@app.get("/")
+def serve_home():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    index_path = os.path.join(script_dir, "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path)
+    return {"status": "REGO Mosaic Studio Python API v3 (Mandatory Demo + Isometric Manual + 3D Layers) is running"}
+
+
+@app.get("/api/demo-image")
+def get_demo_image():
+    """Returns the built-in RE-GO demo PNG file."""
+    demo_path = os.path.join(ORDERS_DIR, "builtin_demo.png")
+    create_demo_image(demo_path)
+    return FileResponse(demo_path, media_type="image/png", filename="rego_demo.png")
+
+
+@app.get("/api/demo")
+def get_mandatory_demo_showcase():
+    """
+    Returns the pre-built 3D RE-GO Demo Mosaic + 8-Step Isometric Manual JSON
+    so the Studio always opens with the crisp RE-GO showcase loaded by default.
+    """
+    demo_path = os.path.join(ORDERS_DIR, "builtin_demo.png")
+    create_demo_image(demo_path)
+    return _build_mosaic_payload(
+        input_path=demo_path,
+        order_id="demo_rego_3d",
+        grid_size=(64, 64),
+        stud_ratio=0.45,
+        merge_tolerance=2.2,
+        safe_z=3,
+        z_mode="luminance",
+        abstract_mode=False,
+        is_demo=True,
+    )
+
+
+@app.post("/api/generate")
+async def create_mosaic(
+    file: UploadFile | None = File(default=None),
+    preset: str = Form("auto"),
+    stud_ratio: float = Form(0.45),
+    merge_tolerance: float = Form(2.2),
+    z_layers: int = Form(3),
+    z_mode: str = Form("luminance"),
+    abstract_mode: bool = Form(False),
+    use_demo: bool = Form(False),
+):
+    safe_z = max(1, min(4, int(z_layers)))
+
+    # Mandatory fallback: if no user file is uploaded, always run the built-in RE-GO Demo Pic
+    is_demo = use_demo or (file is None) or (not getattr(file, "filename", ""))
+    if is_demo:
+        demo_tmp = os.path.join(ORDERS_DIR, "builtin_demo.png")
+        create_demo_image(demo_tmp)
+        with open(demo_tmp, "rb") as df:
+            file_bytes = df.read()
+    else:
+        file_bytes = await file.read()
+
+    sig = (
+        file_bytes[:4096]
+        + str(len(file_bytes)).encode()
+        + f"_{preset}_{stud_ratio}_z{safe_z}_{z_mode}_abs{abstract_mode}".encode()
+    )
+    order_id = hashlib.md5(sig).hexdigest()[:12]
+    input_path = os.path.join(ORDERS_DIR, f"{order_id}_in.png")
+
+    with open(input_path, "wb") as f:
+        f.write(file_bytes)
+
+    grid_size = (32, 32) if abstract_mode else (PRESET_MAP.get(preset, None) or (64, 64 if is_demo else None))
+    result = _build_mosaic_payload(
+        input_path=input_path,
+        order_id=order_id,
+        grid_size=grid_size,
+        stud_ratio=stud_ratio,
+        merge_tolerance=merge_tolerance,
+        safe_z=safe_z,
+        z_mode=z_mode,
+        abstract_mode=abstract_mode,
+        is_demo=is_demo,
+    )
+
+    if os.path.exists(input_path):
+        os.remove(input_path)
+
+    return result
 
 
 @app.get("/api/unlock/{order_id}")

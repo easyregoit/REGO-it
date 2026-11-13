@@ -393,15 +393,14 @@ def filter_background_and_abstract_subject(
     palette_keys: list[tuple[int, str]]
 ) -> tuple[Image.Image, np.ndarray, int]:
     """
-    Isolates the foreground subject (using U2-Net `rembg` if installed, or pure-NumPy
-    CIELAB border-salience + edge contour segmentation), replaces busy backgrounds with a
-    clean contrasting official brick color, and applies edge-preserving abstraction.
+    Isolates the foreground subject, replaces busy backgrounds with a clean studio
+    brick color, and applies edge-preserving abstraction for 32x32 frame builds.
     """
     work_img = img_cropped.resize((256, 256), Image.Resampling.BILINEAR)
     fg_mask = None
 
     try:
-        from rembg import remove # type: ignore
+        from rembg import remove  # type: ignore
         rgba = remove(work_img)
         alpha = np.asarray(rgba)[..., 3].astype(np.float32) / 255.0
         if np.mean(alpha > 0.35) > 0.08:
@@ -444,7 +443,7 @@ def filter_background_and_abstract_subject(
         fg_mask = np.asarray(mask_img) > 127
 
     subject_L = float(np.mean(lab[fg_mask, 0])) if np.any(fg_mask) else 50.0
-    preferred_bg_cid = 63 if subject_L > 48.0 else 48  # Dark Blue (#63) or Sand Green (#48)
+    preferred_bg_cid = 63 if subject_L > 48.0 else 86  # Dark Blue (#63) or Light Bluish Gray (#86)
     bg_palette_idx = next((i for i, (cid, _) in enumerate(palette_keys) if cid == preferred_bg_cid), 0)
 
     poster_img = work_img.filter(ImageFilter.MedianFilter(size=5))
@@ -454,127 +453,267 @@ def filter_background_and_abstract_subject(
     return poster_img, fg_mask, bg_palette_idx
 
 
-def build_overlapping_z_layers(
-    surface_placements: list[dict],
+def compute_stable_terrace_z_grid(
     img_lab: np.ndarray,
     edge_map: np.ndarray,
-    palette_keys: list[tuple[int, str]],
     grid_size: tuple[int, int],
     z_layers: int = 1,
     z_mode: str = "luminance",
-    filler_color_id: int = 86  # 86 = Light Bluish Gray structural interlocking plates
-) -> tuple[list[dict], list[dict]]:
+    fg_mask_grid: np.ndarray | None = None
+) -> np.ndarray:
     """
-    Packs staggered, 90-degree alternating structural plate layers (Z = 1 .. z_layers - 1)
-    that bridge across the seams of adjacent layers so multi-layer builds are rigid and never flimsy.
-    Also couples isolated 1x1 vertical columns (Z >= 3) to adjacent base plates.
+    Computes a morphologically smoothed, terraced Z-height map (1..z_layers) BEFORE packing bricks.
+    Guarantees that:
+    - Elevated areas form solid contiguous plateaus (no spiky 1x1 towers).
+    - Every upper layer (Z=3, 4) sits inside a wider lower terrace (Z=2) for physical stability.
     """
     h, w = grid_size
     if z_layers <= 1:
-        for p in surface_placements:
-            p["z"] = 1
-        return surface_placements, []
+        return np.ones((h, w), dtype=np.int32)
 
-    filler_idx = next((idx for idx, (cid, _) in enumerate(palette_keys) if cid == filler_color_id), 0)
+    if fg_mask_grid is not None and z_layers == 2:
+        # In Abstract Frame mode, elevate the smoothed subject plateau cleanly to Z=2
+        m_img = Image.fromarray((fg_mask_grid.astype(np.uint8) * 255), mode="L")
+        m_img = m_img.filter(ImageFilter.MedianFilter(size=3))
+        clean_fg = np.asarray(m_img) > 127
+        clean_fg[0:2, :] = False
+        clean_fg[-2:, :] = False
+        clean_fg[:, 0:2] = False
+        clean_fg[:, -2:] = False
+        return np.where(clean_fg, 2, 1).astype(np.int32)
 
     lum_norm = np.clip(img_lab[..., 0] / 100.0, 0.0, 1.0)
     edge_max = float(np.max(edge_map)) or 1.0
     edge_norm = edge_map / edge_max
 
     if z_mode == "invert_luminance":
-        score_map = 0.75 * (1.0 - lum_norm) + 0.25 * edge_norm
+        raw_score = 0.75 * (1.0 - lum_norm) + 0.25 * edge_norm
     elif z_mode == "edge_relief":
-        score_map = 0.35 * lum_norm + 0.65 * edge_norm
+        raw_score = 0.35 * lum_norm + 0.65 * edge_norm
     else:
-        score_map = 0.75 * lum_norm + 0.25 * edge_norm
+        raw_score = 0.75 * lum_norm + 0.25 * edge_norm
+
+    # Smooth score map so Z-layers form broad, stable LEGO terraces instead of noisy spikes
+    score_u8 = np.clip(raw_score * 255.0, 0, 255).astype(np.uint8)
+    score_img = Image.fromarray(score_u8, mode="L").filter(ImageFilter.MedianFilter(size=5))
+    smooth_score = np.asarray(score_img, dtype=np.float32) / 255.0
 
     quantiles = [i / z_layers for i in range(1, z_layers)]
-    cutoffs = np.quantile(score_map, quantiles)
+    cutoffs = np.quantile(smooth_score, quantiles)
+    z_grid = (np.searchsorted(cutoffs, smooth_score) + 1).astype(np.int32)
 
-    top_z_grid = np.ones((h, w), dtype=np.int32)
-    surface_seam_grid = np.zeros((h, w), dtype=np.int32)
+    # Enforce stepped pyramid terrace rule: Layer Z must be supported by a wider Layer Z-1
+    for lz in range(z_layers, 2, -1):
+        upper_mask = (z_grid >= lz).astype(np.uint8) * 255
+        dilated = Image.fromarray(upper_mask, mode="L").filter(ImageFilter.MaxFilter(size=3))
+        must_support = np.asarray(dilated) > 127
+        z_grid = np.where(must_support & (z_grid < lz - 1), lz - 1, z_grid)
 
-    for idx, p in enumerate(surface_placements, start=1):
-        r, c, ph, pw = p["r"], p["c"], p["h"], p["w"]
-        region_score = float(np.mean(score_map[r:r + ph, c:c + pw]))
-        z_height = int(np.searchsorted(cutoffs, region_score)) + 1
-        p["z"] = z_height
-        top_z_grid[r:r + ph, c:c + pw] = z_height
-        surface_seam_grid[r:r + ph, c:c + pw] = idx
+    return z_grid
 
-    # Prevent flimsy 1x1 vertical towers (Z >= 3) by widening their structural support footprint on lower layers
-    support_z_grid = top_z_grid.copy()
-    if z_layers >= 3:
-        for r in range(h):
-            for c in range(w):
-                if top_z_grid[r, c] >= 3:
-                    for nr, nc in [(r, c + 1), (r + 1, c), (r, c - 1), (r - 1, c)]:
-                        if 0 <= nr < h and 0 <= nc < w and top_z_grid[nr, nc] >= 2:
-                            support_z_grid[nr, nc] = max(support_z_grid[nr, nc], top_z_grid[r, c] - 1)
-                            break
 
-    # Odd layers prioritize horizontal plates; Even layers rotate 90° to cross-bridge seams
-    horiz_plates = [
+def build_interlocking_layers(
+    nearest_indices: np.ndarray,
+    stud_mask: np.ndarray,
+    edge_map: np.ndarray,
+    subpixel_lab: np.ndarray,
+    palette_lab: np.ndarray,
+    palette_keys: list[tuple[int, str]],
+    z_grid: np.ndarray,
+    filler_color_id: int = 86  # 86 = Light Bluish Gray structural plates
+) -> tuple[list[dict], list[dict]]:
+    """
+    Packs the mosaic strictly layer-by-layer from Z = 1 up to max_z:
+    - On Layer Z, cells that reach their final height (z_grid == Z) get their visible surface brick.
+    - Cells that will rise higher (z_grid > Z) get structural studded plates in a 90°-rotated
+      orientation that bridges across the seams of Layer Z-1.
+    - Every piece on Layer Z>1 is scored to overlap at least 2 pieces from Layer Z-1.
+    """
+    h, w = nearest_indices.shape
+    max_z = int(np.max(z_grid))
+    filler_idx = next((idx for idx, (cid, _) in enumerate(palette_keys) if cid == filler_color_id), 0)
+
+    horiz_First = [
         (2, 4, "plate_2x4"), (1, 4, "plate_1x4"), (2, 3, "plate_2x3"),
         (1, 3, "plate_1x3"), (2, 2, "plate_2x2"), (1, 2, "plate_1x2"),
         (4, 2, "plate_2x4"), (4, 1, "plate_1x4"), (3, 2, "plate_2x3"),
-        (3, 1, "plate_1x3"), (2, 1, "plate_1x2"), (1, 1, "plate_1x1"),
+        (3, 1, "plate_1x3"), (2, 1, "plate_1x2"),
     ]
-    vert_plates = [
+    vert_First = [
         (4, 2, "plate_2x4"), (4, 1, "plate_1x4"), (3, 2, "plate_2x3"),
         (3, 1, "plate_1x3"), (2, 2, "plate_2x2"), (2, 1, "plate_1x2"),
         (2, 4, "plate_2x4"), (1, 4, "plate_1x4"), (2, 3, "plate_2x3"),
-        (1, 3, "plate_1x3"), (1, 2, "plate_1x2"), (1, 1, "plate_1x1"),
+        (1, 3, "plate_1x3"), (1, 2, "plate_1x2"),
+    ]
+    horiz_Tiles = [
+        (2, 4, "tile_2x4"), (1, 4, "tile_1x4"), (2, 2, "tile_2x2"),
+        (1, 3, "tile_1x3"), (1, 2, "tile_1x2"),
+        (4, 2, "tile_2x4"), (4, 1, "tile_1x4"), (3, 1, "tile_1x3"), (2, 1, "tile_1x2"),
+    ]
+    vert_Tiles = [
+        (4, 2, "tile_2x4"), (4, 1, "tile_1x4"), (2, 2, "tile_2x2"),
+        (3, 1, "tile_1x3"), (2, 1, "tile_1x2"),
+        (2, 4, "tile_2x4"), (1, 4, "tile_1x4"), (1, 3, "tile_1x3"), (1, 2, "tile_1x2"),
     ]
 
-    under_placements = []
-    prev_layer_seams = surface_seam_grid.copy()
-    piece_uid = 10000
+    high_edge_thresh = np.quantile(edge_map, 0.68)
+    med_edge_thresh = np.quantile(edge_map, 0.50)
 
-    for layer_z in range(1, z_layers):
-        need_mask = support_z_grid > layer_z
-        visited = ~need_mask
-        current_seams = np.zeros((h, w), dtype=np.int32)
-        candidate_shapes = vert_plates if (layer_z % 2 == 1) else horiz_plates
+    surface_placements: list[dict] = []
+    under_placements: list[dict] = []
+    prev_seam_grid = np.zeros((h, w), dtype=np.int32)
+    uid = 1
 
+    for lz in range(1, max_z + 1):
+        curr_seam_grid = np.zeros((h, w), dtype=np.int32)
+        odd_layer = (lz % 2 == 1)
+        plate_order = horiz_First if odd_layer else vert_First
+        tile_order = horiz_Tiles if odd_layer else vert_Tiles
+
+        # 1. Pack structural studded plates for all cells where z_grid > lz
+        struct_visited = ~(z_grid > lz)
         for r in range(h):
             for c in range(w):
-                if visited[r, c]:
+                if struct_visited[r, c]:
                     continue
-
                 best_shape = (1, 1, "plate_1x1")
                 best_score = -1
-
-                for sh, sw, part_key in candidate_shapes:
+                for sh, sw, part_key in plate_order:
                     if not is_part_available(part_key, filler_color_id):
                         continue
-                    if r + sh <= h and c + sw <= w and not np.any(visited[r:r + sh, c:c + sw]):
-                        bridged_ids = np.unique(prev_layer_seams[r:r + sh, c:c + sw])
-                        bridged_count = len(bridged_ids[bridged_ids > 0])
-                        score = (bridged_count * 30) + (sh * sw * 4)
+                    if r + sh <= h and c + sw <= w and not np.any(struct_visited[r:r + sh, c:c + sw]):
+                        bridged = len(np.unique(prev_seam_grid[r:r + sh, c:c + sw])) if lz > 1 else 1
+                        score = (bridged * 35) + (sh * sw * 5)
                         if score > best_score:
                             best_score = score
                             best_shape = (sh, sw, part_key)
-                        if bridged_count >= 2 and sh * sw >= 6:
+                        if bridged >= 2 and sh * sw >= 6:
                             break
-
                 sh, sw, part_key = best_shape
-                visited[r:r + sh, c:c + sw] = True
-                piece_uid += 1
-                current_seams[r:r + sh, c:c + sw] = piece_uid
-
+                struct_visited[r:r + sh, c:c + sw] = True
+                uid += 1
+                curr_seam_grid[r:r + sh, c:c + sw] = uid
                 under_placements.append({
-                    "r": r, "c": c, "h": sh, "w": sw,
-                    "z": layer_z,
+                    "r": r, "c": c, "h": sh, "w": sw, "z": lz,
                     "color_idx": filler_idx,
                     "bg_color_idx": filler_idx,
                     "part_key": part_key,
                     "is_stud": True,
                     "shape": "rect",
                     "orient": None,
+                    "is_structural": True,
                 })
 
-        prev_layer_seams = current_seams
+        # 2. Pack visible surface pieces for all cells where z_grid == lz
+        surf_visited = ~(z_grid == lz)
+        for r in range(h):
+            for c in range(w):
+                if surf_visited[r, c] or edge_map[r, c] > high_edge_thresh:
+                    continue
+                color_idx = int(nearest_indices[r, c])
+                color_id = palette_keys[color_idx][0]
+                is_stud = bool(stud_mask[r, c])
+                shapes = plate_order if is_stud else tile_order
+
+                best_candidate = None
+                best_score = -1
+                for sh, sw, part_key in shapes:
+                    if not is_part_available(part_key, color_id):
+                        continue
+                    if r + sh <= h and c + sw <= w:
+                        reg_vis = surf_visited[r:r + sh, c:c + sw]
+                        reg_col = nearest_indices[r:r + sh, c:c + sw]
+                        reg_stud = stud_mask[r:r + sh, c:c + sw]
+                        if not np.any(reg_vis) and np.all(reg_col == color_idx) and np.all(reg_stud == is_stud):
+                            bridged = len(np.unique(prev_seam_grid[r:r + sh, c:c + sw])) if lz > 1 else 1
+                            score = (bridged * 30) + (sh * sw * 6)
+                            if score > best_score:
+                                best_score = score
+                                best_candidate = (sh, sw, part_key)
+                            if bridged >= 2 and sh * sw >= 4:
+                                break
+
+                if best_candidate is not None:
+                    sh, sw, part_key = best_candidate
+                    final_key = part_key
+                    shape_type = "rect"
+                    if (part_key == "tile_2x2"
+                            and is_part_available("tile_round_2x2", color_id)
+                            and np.mean(edge_map[r:r + 2, c:c + 2]) > med_edge_thresh):
+                        final_key = "tile_round_2x2"
+                        shape_type = "round_2x2"
+                    surf_visited[r:r + sh, c:c + sw] = True
+                    uid += 1
+                    curr_seam_grid[r:r + sh, c:c + sw] = uid
+                    surface_placements.append({
+                        "r": r, "c": c, "h": sh, "w": sw, "z": lz,
+                        "color_idx": color_idx,
+                        "bg_color_idx": color_idx,
+                        "part_key": final_key,
+                        "is_stud": is_stud,
+                        "shape": shape_type,
+                        "orient": None,
+                        "is_structural": False,
+                    })
+
+        # 3. Remaining 1x1 detail cells on Layer lz
+        for r in range(h):
+            for c in range(w):
+                if surf_visited[r, c]:
+                    continue
+                surf_visited[r, c] = True
+                uid += 1
+                curr_seam_grid[r, c] = uid
+                color_idx = int(nearest_indices[r, c])
+                color_id = palette_keys[color_idx][0]
+                is_stud = bool(stud_mask[r, c])
+                sub_lab = subpixel_lab[r * 2:(r + 1) * 2, c * 2:(c + 1) * 2]
+
+                neighbors = []
+                for nr, nc in [(r - 1, c), (r + 1, c), (r, c - 1), (r, c + 1)]:
+                    if 0 <= nr < h and 0 <= nc < w and nearest_indices[nr, nc] != color_idx:
+                        neighbors.append(int(nearest_indices[nr, nc]))
+
+                placed_curve = False
+                if neighbors and is_part_available("tile_qtr_1x1", color_id):
+                    bg_color_idx = Counter(neighbors).most_common(1)[0][0]
+                    orient, improvement = detect_subpixel_orientation(
+                        sub_lab, palette_lab[color_idx], palette_lab[bg_color_idx]
+                    )
+                    if improvement > 8.5:
+                        surface_placements.append({
+                            "r": r, "c": c, "h": 1, "w": 1, "z": lz,
+                            "color_idx": color_idx,
+                            "bg_color_idx": bg_color_idx,
+                            "part_key": "tile_qtr_1x1",
+                            "is_stud": False,
+                            "shape": "qtr_1x1",
+                            "orient": orient,
+                            "is_structural": False,
+                        })
+                        placed_curve = True
+
+                if not placed_curve:
+                    want_round = edge_map[r, c] > high_edge_thresh
+                    if is_stud:
+                        can_round = want_round and is_part_available("plate_round_1x1", color_id)
+                        part_key = "plate_round_1x1" if can_round else "plate_1x1"
+                    else:
+                        can_round = want_round and is_part_available("tile_round_1x1", color_id)
+                        part_key = "tile_round_1x1" if can_round else "tile_1x1"
+
+                    surface_placements.append({
+                        "r": r, "c": c, "h": 1, "w": 1, "z": lz,
+                        "color_idx": color_idx,
+                        "bg_color_idx": color_idx,
+                        "part_key": part_key,
+                        "is_stud": is_stud,
+                        "shape": "round_1x1" if can_round else "rect",
+                        "orient": None,
+                        "is_structural": False,
+                    })
+
+        prev_seam_grid = curr_seam_grid
 
     return surface_placements, under_placements
 
@@ -659,6 +798,49 @@ def render_mixed_mosaic(
     return canvas
 
 
+def _draw_iso_baseplate(
+    draw: ImageDraw.ImageDraw,
+    h: int, w: int,
+    origin_x: float, origin_y: float,
+    u_x: float, u_y: float, z_px: float
+):
+    """Draws an authentic LEGO Dark Bluish Gray baseplate with visible stud grid rings."""
+    def proj(row: float, col: float, layer_z: float) -> tuple[float, float]:
+        return (origin_x + (col - row) * u_x, origin_y + (col + row) * u_y - layer_z * z_px)
+
+    top_col = (108, 112, 116)
+    left_col = (82, 86, 90)
+    right_col = (64, 68, 72)
+    edge_col = (48, 52, 56)
+
+    p_top = proj(0, 0, 0.0)
+    p_right = proj(0, w, 0.0)
+    p_front = proj(h, w, 0.0)
+    p_left = proj(h, 0, 0.0)
+    p_left_bot = proj(h, 0, -0.5)
+    p_front_bot = proj(h, w, -0.5)
+    p_right_bot = proj(0, w, -0.5)
+
+    draw.polygon([p_left, p_front, p_front_bot, p_left_bot], fill=left_col, outline=edge_col)
+    draw.polygon([p_front, p_right, p_right_bot, p_front_bot], fill=right_col, outline=edge_col)
+    draw.polygon([p_top, p_right, p_front, p_left], fill=top_col, outline=edge_col)
+
+    # Subtle 1x1 grid lines so builders can count studs on empty baseplate areas
+    grid_line_col = (96, 100, 104)
+    for r in range(1, h):
+        draw.line([proj(r, 0, 0.0), proj(r, w, 0.0)], fill=grid_line_col, width=1)
+    for c in range(1, w):
+        draw.line([proj(0, c, 0.0), proj(h, c, 0.0)], fill=grid_line_col, width=1)
+
+    if u_x >= 4.0:
+        srx = max(1.4, u_x * 0.28)
+        sry = max(0.8, u_y * 0.28)
+        for r in range(h):
+            for c in range(w):
+                sx, sy = proj(r + 0.5, c + 0.5, 0.0)
+                draw.ellipse([sx - srx, sy - sry, sx + srx, sy + sry], outline=(88, 92, 96))
+
+
 def _draw_iso_brick(
     draw: ImageDraw.ImageDraw,
     r: float, c: float, h: float, w: float, z: int,
@@ -666,25 +848,22 @@ def _draw_iso_brick(
     is_stud: bool,
     origin_x: float, origin_y: float,
     u_x: float, u_y: float, z_px: float,
-    ghosted: bool = False,
-    highlight_active: bool = False
+    is_new_step: bool = False
 ):
-    """Draws a 3D isometric brick/plate with top diamond face, side walls, and cylindrical 3D studs."""
+    """
+    Draws a 3D isometric LEGO plate/tile with true 0.40x plate thickness.
+    Previous steps render in natural LEGO colors with crisp dark-gray ink outlines;
+    newly placed bricks in the current step get an authentic LEGO red placement outline.
+    """
     def proj(row: float, col: float, layer_z: float) -> tuple[float, float]:
-        px = origin_x + (col - row) * u_x
-        py = origin_y + (col + row) * u_y - layer_z * z_px
-        return (px, py)
+        return (origin_x + (col - row) * u_x, origin_y + (col + row) * u_y - layer_z * z_px)
 
-    if ghosted:
-        top_col = tuple(int(0.62 * v + 0.38 * 225) for v in color_rgb)
-        left_col = clamp_rgb(top_col, -16)
-        right_col = clamp_rgb(top_col, -30)
-        outline_col = (145, 165, 185)
-    else:
-        top_col = color_rgb
-        left_col = clamp_rgb(color_rgb, -28)
-        right_col = clamp_rgb(color_rgb, -50)
-        outline_col = (255, 210, 35) if highlight_active else clamp_rgb(color_rgb, -75)
+    top_col = color_rgb
+    left_col = clamp_rgb(color_rgb, -24)
+    right_col = clamp_rgb(color_rgb, -44)
+    # Authentic LEGO instruction manual ink outline: dark charcoal for existing, bright red for current step
+    outline_col = (224, 36, 36) if is_new_step else (42, 46, 52)
+    stud_outline = (55, 60, 66)
 
     z_top = float(z)
     z_bot = float(z - 1)
@@ -702,19 +881,23 @@ def _draw_iso_brick(
     draw.polygon([p_front, p_right, p_right_bot, p_front_bot], fill=right_col, outline=outline_col)
     draw.polygon([p_top, p_right, p_front, p_left], fill=top_col, outline=outline_col)
 
-    if is_stud and u_x >= 4.2:
-        stud_rx = max(1.8, u_x * 0.34)
-        stud_ry = max(1.1, u_y * 0.34)
-        stud_h = max(1.4, z_px * 0.32)
+    if is_new_step:
+        # Crisp red highlight border around the newly added piece's top face
+        draw.line([p_top, p_right, p_front, p_left, p_top], fill=(224, 36, 36), width=2)
+
+    if is_stud and u_x >= 3.8:
+        stud_rx = max(1.6, u_x * 0.32)
+        stud_ry = max(0.9, u_y * 0.32)
+        stud_h = max(1.0, z_px * 0.34)
         for sr in range(int(h)):
             for sc in range(int(w)):
                 sx, sy = proj(r + sr + 0.5, c + sc + 0.5, z_top)
-                draw.rectangle([sx - stud_rx, sy - stud_h, sx + stud_rx, sy], fill=left_col, outline=outline_col)
-                draw.ellipse([sx - stud_rx, sy - stud_ry, sx + stud_rx, sy + stud_ry], fill=left_col, outline=outline_col)
+                draw.rectangle([sx - stud_rx, sy - stud_h, sx + stud_rx, sy], fill=left_col, outline=stud_outline)
+                draw.ellipse([sx - stud_rx, sy - stud_ry, sx + stud_rx, sy + stud_ry], fill=left_col, outline=stud_outline)
                 draw.ellipse(
                     [sx - stud_rx, sy - stud_h - stud_ry, sx + stud_rx, sy - stud_h + stud_ry],
                     fill=top_col,
-                    outline=outline_col
+                    outline=stud_outline
                 )
 
 
@@ -727,120 +910,121 @@ def generate_isometric_manual(
     output_manual_path: str
 ) -> str:
     """
-    Renders an official LEGO-style 3D Isometric Instruction Manual showing:
-    - Step-by-step overlapping brick-bond layer assembly in 3D isometric perspective
-    - Parts Callout Box per step with mini isometric brick icons & exact quantities
-    - Ghosted previous layers + highlighted active bricks
+    Renders an authentic LEGO-style 8-Step Isometric Instruction Booklet:
+    - Breaks every layer into manageable quadrant/band steps (never dumps everything into 2 steps).
+    - Uses the real LEGO instruction manual color palette (soft pastel-blue page #E4F0F8,
+      clean light-gray/white parts callout box with thin slate border, bold step numbers,
+      and red highlight outlines on newly added pieces).
     """
     h, w = grid_size
     all_placements = under_placements + surface_placements
     max_z = max((p.get("z", 1) for p in all_placements), default=1)
+    mid_r, mid_c = h // 2, w // 2
+
+    # Build a digestible 6-to-8 step sequence ordered strictly bottom-to-top (Z=1..max_z) and back-to-front
+    raw_batches: list[tuple[str, list[dict]]] = []
+    for lz in range(1, max_z + 1):
+        layer_pcs = [p for p in all_placements if p.get("z", 1) == lz]
+        if not layer_pcs:
+            continue
+        # Sort back-to-front along the isometric diagonal (r + c)
+        layer_pcs.sort(key=lambda p: (p["r"] + p["c"], p["r"], p["c"]))
+
+        # Split each layer into 4 quadrant steps for 1-2 layer builds, or 2 band steps for 3-4 layer builds
+        num_splits = 4 if max_z <= 2 else 2
+        chunk_size = max(1, (len(layer_pcs) + num_splits - 1) // num_splits)
+        for s_idx in range(0, len(layer_pcs), chunk_size):
+            batch = layer_pcs[s_idx:s_idx + chunk_size]
+            part_num = (s_idx // chunk_size) + 1
+            raw_batches.append((f"Layer {lz} (Section {part_num})", batch))
 
     steps = []
-    if max_z > 1:
-        for lz in range(1, max_z):
-            layer_pcs = [p for p in under_placements if p.get("z", 1) == lz]
-            prior_pcs = [p for p in under_placements if p.get("z", 1) < lz]
-            orient_tag = "90° Cross-Seam Interlock" if lz % 2 == 1 else "Horizontal Brick-Bond"
-            steps.append((
-                f"STEP {lz} — Structural Overlapping Layer Z={lz} ({orient_tag})",
-                prior_pcs,
-                layer_pcs
-            ))
-        steps.append((
-            f"STEP {max_z} — Top Surface Mosaic & Relief Tiles (Z=1..{max_z})",
-            under_placements,
-            surface_placements
-        ))
-    else:
-        mid_r, mid_c = h // 2, w // 2
-        q1 = [p for p in surface_placements if p["r"] < mid_r and p["c"] < mid_c]
-        q2 = [p for p in surface_placements if p["r"] < mid_r and p["c"] >= mid_c]
-        q3 = [p for p in surface_placements if p["r"] >= mid_r and p["c"] < mid_c]
-        q4 = [p for p in surface_placements if p["r"] >= mid_r and p["c"] >= mid_c]
-        steps = [
-            ("STEP 1 — Top-Left Quadrant Assembly", [], q1),
-            ("STEP 2 — Top-Right Quadrant (Bridges Center Seam)", q1, q2),
-            ("STEP 3 — Bottom-Left Quadrant Assembly", q1 + q2, q3),
-            ("STEP 4 — Final Quadrant & Curved Detail Tiles", q1 + q2 + q3, q4),
-        ]
+    accumulated: list[dict] = []
+    for step_num, (label, batch) in enumerate(raw_batches, start=1):
+        steps.append((step_num, label, list(accumulated), batch))
+        accumulated.extend(batch)
 
-    page_w = 1800
-    step_h = 560
-    header_h = 110
-    page_h = header_h + len(steps) * step_h + 40
+    # 2-Column Booklet Grid Layout (2 steps per row, just like open LEGO manual spreads)
+    cols = 2
+    rows = (len(steps) + cols - 1) // cols
+    panel_w = 920
+    panel_h = 520
+    page_w = panel_w * cols
+    page_h = panel_h * rows
 
-    manual = Image.new("RGB", (page_w, page_h), (212, 230, 245))
+    # Official LEGO Instruction Manual soft cool sky-blue background (#E4F0F8)
+    manual = Image.new("RGB", (page_w, page_h), (228, 240, 248))
     draw = ImageDraw.Draw(manual)
 
-    draw.rectangle([0, 0, page_w, header_h], fill=(24, 52, 86))
-    draw.text((40, 28), f"ISOMETRIC ASSEMBLY BLUEPRINT — {w}x{h}x{max_z} INTERLOCKING BUILD", fill=(255, 215, 50))
-    draw.text(
-        (40, 62),
-        "Each structural layer rotates 90 degrees to overlap lower seams. Ghosted bricks indicate completed steps.",
-        fill=(210, 225, 240)
-    )
+    for idx, (step_num, step_label, prior_pcs, active_pcs) in enumerate(steps):
+        row_idx = idx // cols
+        col_idx = idx % cols
+        px0 = col_idx * panel_w
+        py0 = row_idx * panel_h
+        px1 = px0 + panel_w
+        py1 = py0 + panel_h
 
-    for idx, (step_title, ghost_list, active_list) in enumerate(steps):
-        y_top = header_h + idx * step_h + 16
-        y_bot = y_top + step_h - 24
+        # Crisp white LEGO page divider lines between step spreads
+        draw.rectangle([px0, py0, px1, py1], fill=(228, 240, 248), outline=(255, 255, 255), width=4)
 
-        draw.rounded_rectangle([30, y_top, page_w - 30, y_bot], radius=18, fill=(230, 242, 252), outline=(165, 195, 220), width=3)
-
-        callout_x0, callout_y0 = 55, y_top + 22
-        callout_x1, callout_y1 = 500, y_bot - 22
+        # Authentic LEGO Parts Callout Box (Top-Left of Step Panel)
+        box_x0, box_y0 = px0 + 24, py0 + 24
+        box_x1, box_y1 = px0 + 295, py0 + 430
         draw.rounded_rectangle(
-            [callout_x0, callout_y0, callout_x1, callout_y1],
-            radius=14,
-            fill=(255, 255, 255),
-            outline=(180, 205, 228),
+            [box_x0, box_y0, box_x1, box_y1],
+            radius=10,
+            fill=(245, 248, 252),
+            outline=(176, 196, 214),
             width=2
         )
-        draw.rectangle([callout_x0, callout_y0, callout_x1, callout_y0 + 44], fill=(35, 72, 115))
-        draw.text((callout_x0 + 18, callout_y0 + 14), step_title, fill=(255, 255, 255))
 
-        step_counts = Counter((p["color_idx"], p["part_key"], p["h"], p["w"], p["is_stud"]) for p in active_list)
-        top_step_parts = step_counts.most_common(7)
+        # Large LEGO Step Number & Layer Subtitle right below the Parts Callout Box
+        draw.text((box_x0 + 6, box_y1 + 14), f"STEP {step_num}", fill=(30, 38, 48))
+        draw.text((box_x0 + 85, box_y1 + 14), f"— {step_label}  ({len(active_pcs)} pcs)", fill=(85, 100, 118))
 
-        row_y = callout_y0 + 62
+        # Tally parts for this step's Callout Box
+        step_counts = Counter((p["color_idx"], p["part_key"], p["h"], p["w"], p["is_stud"]) for p in active_pcs)
+        top_step_parts = step_counts.most_common(6)
+
+        item_y = box_y0 + 28
         for (c_idx, p_key, ph, pw, is_st), qty in top_step_parts:
             c_id, c_name = palette_keys[c_idx]
             p_id, p_name = PART_CATALOG[p_key]
             rgb = tuple(int(v) for v in palette_rgb[c_idx])
 
+            # Mini isometric part preview inside callout box
             _draw_iso_brick(
                 draw, r=0, c=0, h=min(2, ph), w=min(3, pw), z=1,
                 color_rgb=rgb, is_stud=is_st,
-                origin_x=callout_x0 + 55, origin_y=row_y + 12,
-                u_x=9.0, u_y=5.0, z_px=7.0,
-                ghosted=False, highlight_active=False
+                origin_x=box_x0 + 48, origin_y=item_y + 8,
+                u_x=8.5, u_y=4.25, z_px=3.6,
+                is_new_step=False
             )
-            short_part = p_name.split("(")[0].strip()
-            draw.text((callout_x0 + 115, row_y + 4), f"{qty}x  {c_name} {short_part} (#{p_id})", fill=(25, 35, 48))
-            row_y += 58
+            short_shape = p_name.split("(")[0].replace("Plate ", "").replace("Tile ", "").strip()
+            draw.text((box_x0 + 98, item_y), f"{qty}x", fill=(20, 24, 30))
+            draw.text((box_x0 + 132, item_y), f"{c_name[:14]} {short_shape}", fill=(65, 75, 88))
+            item_y += 58
 
-        if len(step_counts) > 7:
-            extra_pcs = sum(q for _, q in list(step_counts.items())[7:])
-            draw.text((callout_x0 + 20, callout_y1 - 28), f"+ {extra_pcs} additional pieces in this step", fill=(90, 110, 130))
+        if len(step_counts) > 6:
+            rem_qty = sum(q for _, q in list(step_counts.items())[6:])
+            draw.text((box_x0 + 16, box_y1 - 26), f"+ {rem_qty} more detail pcs", fill=(100, 115, 130))
 
-        iso_center_x = 1140.0
-        u_x = min(13.0, max(4.2, 510.0 / max(h, w)))
-        u_y = u_x * 0.55
-        z_px = max(5.0, u_x * 0.68)
-        iso_origin_y = y_top + 65.0
+        # Right-Side 3D Isometric Assembly View (True 2:1 Isometric Ratio & 0.40x Plate Height)
+        u_x = min(9.5, max(3.6, 265.0 / max(h, w)))
+        u_y = u_x * 0.50
+        z_px = u_x * 0.40  # True LEGO plate height-to-stud ratio so stacks look solid and low-profile
+        board_pixel_h = (h + w) * u_y
+        iso_center_x = px0 + 605.0
+        iso_origin_y = py0 + (panel_h - board_pixel_h) * 0.5 + 10.0
 
-        _draw_iso_brick(
-            draw, r=0, c=0, h=h, w=w, z=0,
-            color_rgb=(45, 54, 66), is_stud=False,
-            origin_x=iso_center_x, origin_y=iso_origin_y,
-            u_x=u_x, u_y=u_y, z_px=z_px,
-            ghosted=False
-        )
+        # 1. Draw the Baseplate with visible stud rings
+        _draw_iso_baseplate(draw, h, w, iso_center_x, iso_origin_y, u_x, u_y, z_px)
 
-        combined = [(True, p) for p in ghost_list] + [(False, p) for p in active_list]
+        # 2. Draw all bricks in strict Painter's order (bottom-to-top Z, back-to-front r+c)
+        combined = [(False, p) for p in prior_pcs] + [(True, p) for p in active_pcs]
         combined.sort(key=lambda item: (item[1].get("z", 1), item[1]["r"] + item[1]["c"], item[1]["r"], item[1]["c"]))
 
-        for is_ghost, p in combined:
+        for is_new, p in combined:
             rgb = tuple(int(v) for v in palette_rgb[p["color_idx"]])
             _draw_iso_brick(
                 draw,
@@ -849,8 +1033,7 @@ def generate_isometric_manual(
                 is_stud=p["is_stud"],
                 origin_x=iso_center_x, origin_y=iso_origin_y,
                 u_x=u_x, u_y=u_y, z_px=z_px,
-                ghosted=is_ghost,
-                highlight_active=(not is_ghost and max_z > 1)
+                is_new_step=is_new
             )
 
     manual.save(output_manual_path, format="PNG")
@@ -1020,24 +1203,27 @@ def generate_brick_mosaic(
         stud_mask[:, 0] = False
         stud_mask[:, -1] = False
 
-    surface_placements = pack_multi_shape_mosaic(
+    effective_z = max(2, z_layers) if abstract_mode else z_layers
+
+    # 1. Compute smoothed, terraced Z-height map first so no piece straddles unstable heights
+    z_grid = compute_stable_terrace_z_grid(
+        img_lab=img_lab,
+        edge_map=edge_map,
+        grid_size=grid_size,
+        z_layers=effective_z,
+        z_mode=z_mode,
+        fg_mask_grid=fg_mask_grid,
+    )
+
+    # 2. Pack each layer from Z=1 to effective_z with 90-degree cross-seam interlocking
+    surface_placements, under_placements = build_interlocking_layers(
         nearest_indices=nearest_indices,
         stud_mask=stud_mask,
         edge_map=edge_map,
         subpixel_lab=subpixel_lab,
         palette_lab=palette_lab,
-        palette_keys=palette_keys
-    )
-
-    effective_z = max(2, z_layers) if abstract_mode else z_layers
-    surface_placements, under_placements = build_overlapping_z_layers(
-        surface_placements=surface_placements,
-        img_lab=img_lab,
-        edge_map=edge_map,
         palette_keys=palette_keys,
-        grid_size=grid_size,
-        z_layers=effective_z,
-        z_mode=z_mode
+        z_grid=z_grid,
     )
 
     mosaic_img = render_mixed_mosaic(surface_placements, palette_rgb, grid_size, target_output_px=target_output_px)
@@ -1066,10 +1252,7 @@ def generate_brick_mosaic(
         part_id, part_name = PART_CATALOG[part_key]
         bom[(color_id, color_name, part_id, part_name)] = count
 
-    total_studs = (
-        grid_size[0] * grid_size[1]
-        + sum(u["h"] * u["w"] for u in under_placements)
-    )
+    total_studs = int(np.sum(z_grid))
     return bom, grid_size, total_studs
 # --- END OF TRUE-TONE COLOR CHANGE IN mosaic_engine.py ---
 

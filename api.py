@@ -4,6 +4,7 @@ import os
 import tempfile
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from PIL import Image, ImageDraw, ImageFilter
 from mosaic_engine import generate_brick_mosaic, export_bricklink_xml
 
@@ -16,7 +17,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-INTERNAL_UNLOCK_SECRET = os.getenv("INTERNAL_UNLOCK_SECRET", "change-me-in-render-and-vercel")
+INTERNAL_UNLOCK_SECRET = os.getenv("INTERNAL_UNLOCK_SECRET", "rego_unlock_8492019482_x9k2m7p4")
 ORDERS_DIR = os.path.join(tempfile.gettempdir(), "rego_orders")
 os.makedirs(ORDERS_DIR, exist_ok=True)
 
@@ -29,15 +30,17 @@ PRESET_MAP = {
 }
 
 
-def make_peek_preview(img_path: str, blur_radius: int = 6) -> str:
+def make_peek_preview(img_path: str, blur_radius: int = 16) -> str:
+    """Heavily blurs 85% of the mosaic while keeping a razor-sharp HD center peek window."""
     img = Image.open(img_path).convert("RGB")
-    sharp = img.resize((700, 700), Image.Resampling.BILINEAR)
+    sharp = img.resize((1200, 1200), Image.Resampling.LANCZOS)
     blurred = sharp.filter(ImageFilter.GaussianBlur(radius=blur_radius))
 
-    box = (230, 230, 470, 470)
+    # Crisp 400x400 center peek window showing true 3D stud and flat-tile detail
+    box = (400, 400, 800, 800)
     blurred.paste(sharp.crop(box), box)
     draw = ImageDraw.Draw(blurred)
-    draw.rectangle(box, outline=(255, 200, 50), width=3)
+    draw.rectangle(box, outline=(255, 200, 50), width=4)
 
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
         blurred.save(tmp.name, format="PNG")
@@ -48,7 +51,11 @@ def make_peek_preview(img_path: str, blur_radius: int = 6) -> str:
 
 
 @app.get("/")
-def health_check():
+def serve_home():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    index_path = os.path.join(script_dir, "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path)
     return {"status": "REGO Mosaic Studio Python API is running"}
 
 
@@ -97,10 +104,24 @@ async def create_mosaic(
     if os.path.exists(input_path):
         os.remove(input_path)
 
-    peek_b64 = make_peek_preview(output_png, blur_radius=6)
+    with open(output_png, "rb") as img_f:
+        hd_b64 = f"data:image/png;base64,{base64.b64encode(img_f.read()).decode('utf-8')}"
+
+    peek_b64 = make_peek_preview(output_png, blur_radius=16)
     total_pieces = sum(bom.values())
     reduction_pct = round((1.0 - (total_pieces / max(1, total_studs))) * 100.0, 1)
     is_3d = safe_z > 1
+
+    parts_summary = [
+        {
+            "color_id": cid,
+            "color_name": cname,
+            "part_id": pid,
+            "part_name": pname,
+            "count": count,
+        }
+        for (cid, cname, pid, pname), count in list(bom.items())[:25]
+    ]
 
     return {
         "order_id": order_id,
@@ -110,9 +131,11 @@ async def create_mosaic(
         "total_studs": total_studs,
         "total_pieces": total_pieces,
         "reduction_pct": reduction_pct,
-        "preview_image": peek_b64,
         "blurred_preview_image": peek_b64,
+        "preview_image": hd_b64,
+        "hd_image": hd_b64,
         "xml_content": xml_string,
+        "top_parts": parts_summary,
     }
 
 
@@ -135,5 +158,6 @@ def unlock_order(order_id: str, x_internal_secret: str = Header(default="")):
     return {
         "order_id": order_id,
         "preview_image": f"data:image/png;base64,{hd_b64}",
+        "hd_image": f"data:image/png;base64,{hd_b64}",
         "xml_content": xml_string,
     }

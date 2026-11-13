@@ -1291,4 +1291,4 @@ def generate_isometric_manual(
 
         row_idx = idx // cols
         col_idx = idx % cols
-        px0 =
+        px0 = col_idx * panel_w

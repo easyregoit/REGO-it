@@ -500,6 +500,42 @@ def detect_boxed_grooves_and_preserve_lines(
     return groove_mask, dark_sub_rgb
 
 
+def compute_focus_and_detail_maps(img_rgb_norm: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Extracts two AI perception maps that work even on blurry or low-contrast photos:
+    1. focus_map (0..1): Local high-frequency Laplacian variance — detects what is in-focus
+       vs. blurry background bokeh so blurry areas are never elevated to top layers.
+    2. detail_band (0..1): Multi-scale Difference-of-Gaussians (DoG) that recovers distinct
+       internal features (eyes, noses, mouths, boxed letters) from soft/blurry images.
+    """
+    gray_u8 = np.clip(
+        (0.2126 * img_rgb_norm[..., 0] + 0.7152 * img_rgb_norm[..., 1] + 0.0722 * img_rgb_norm[..., 2]) * 255.0,
+        0, 255
+    ).astype(np.uint8)
+    pil_g = Image.fromarray(gray_u8, mode="L")
+
+    # Multi-scale Gaussian pyramid for Difference-of-Gaussians (DoG) detail recovery
+    g_fine = np.asarray(pil_g.filter(ImageFilter.GaussianBlur(radius=0.8)), dtype=np.float32)
+    g_med = np.asarray(pil_g.filter(ImageFilter.GaussianBlur(radius=2.2)), dtype=np.float32)
+    g_coarse = np.asarray(pil_g.filter(ImageFilter.GaussianBlur(radius=5.0)), dtype=np.float32)
+
+    # DoG captures distinct structural features regardless of overall lighting or blur
+    dog_fine = np.abs(g_fine - g_med)
+    dog_broad = np.abs(g_med - g_coarse)
+    raw_detail = 0.65 * dog_fine + 0.35 * dog_broad
+    detail_max = float(np.percentile(raw_detail, 98)) or 1.0
+    detail_band = np.clip(raw_detail / detail_max, 0.0, 1.0)
+
+    # Local Focus / Sharpness energy (smoothed over neighborhood to find the in-focus subject)
+    lap_energy = np.clip((dog_fine / (float(np.percentile(dog_fine, 95)) or 1.0)) * 255.0, 0, 255).astype(np.uint8)
+    focus_smooth = Image.fromarray(lap_energy, mode="L").filter(ImageFilter.BoxBlur(radius=3))
+    focus_arr = np.asarray(focus_smooth, dtype=np.float32)
+    f_max = float(np.max(focus_arr)) or 1.0
+    focus_map = np.clip(focus_arr / f_max, 0.0, 1.0)
+
+    return focus_map, detail_band
+
+
 def compute_stable_terrace_z_grid(
     img_lab: np.ndarray,
     edge_map: np.ndarray,
@@ -510,17 +546,25 @@ def compute_stable_terrace_z_grid(
     groove_mask: np.ndarray | None = None
 ) -> np.ndarray:
     """
-    Subject- and Box-Aware 3D Elevation Map:
-    1. Automatically locks the outer background color (e.g. yellow backdrop) to Base Layer Z=1.
-    2. Elevates the foreground boxed subject to Z=z_layers (e.g. Z=3).
-    3. Carves internal contour lines / letter outlines (`groove_mask`) 1 layer lower (Z=z_layers-1)
-       so boxed letters and brick panels pop out cleanly as flat, physical 3D relief plateaus!
+    AI Detail & Focus-Aware 3D Layer Allocator:
+    - Works across sharp logos, portraits, pets, and blurry photos.
+    - Pushes out-of-focus / background regions to Layer Z=1.
+    - Allocates the subject across Layers 2..z_layers by distinct feature salience
+      (mid-tone body on lower terrace, distinct facial/object details on top terrace,
+      and dark contour outlines carved 1 layer down so details never blob together).
     """
     h, w = grid_size
     if z_layers <= 1:
         return np.ones((h, w), dtype=np.int32)
 
-    # 1. Detect outer border background color in CIELAB so bright backgrounds stay flat at Z=1
+    # Reconstruct normalized RGB approximation from L*a*b* lightness & chroma for focus/detail analysis
+    lum_norm = np.clip(img_lab[..., 0] / 100.0, 0.0, 1.0)
+    chroma = np.hypot(img_lab[..., 1], img_lab[..., 2])
+    chroma_norm = np.clip(chroma / (float(np.percentile(chroma, 95)) or 1.0), 0.0, 1.0)
+    pseudo_rgb = np.stack([lum_norm, lum_norm, chroma_norm], axis=-1)
+    focus_map, detail_band = compute_focus_and_detail_maps(pseudo_rgb)
+
+    # 1. Identify Background vs. Foreground Subject using Border Lab + Focus Map + Center Prior
     b_pad = max(2, min(h, w) // 12)
     border_lab = np.concatenate([
         img_lab[:b_pad, :, :].reshape(-1, 3),
@@ -528,36 +572,47 @@ def compute_stable_terrace_z_grid(
         img_lab[:, :b_pad, :].reshape(-1, 3),
         img_lab[:, -b_pad:, :].reshape(-1, 3),
     ], axis=0)
-    median_bg_lab = np.median(border_lab, axis=0)
-    border_spread = float(np.percentile(np.linalg.norm(border_lab - median_bg_lab, axis=-1), 75))
-    dist_to_bg = np.linalg.norm(img_lab - median_bg_lab[np.newaxis, np.newaxis, :], axis=-1)
 
-    has_clean_backdrop = border_spread < 18.0
+    # Cluster border into 3 reference tones (handles two-tone sky/ground or indoor walls)
+    step = max(1, len(border_lab) // 3)
+    bg_refs = [np.median(border_lab[i * step:(i + 1) * step], axis=0) for i in range(3)]
+    bg_dists = [np.linalg.norm(img_lab - ref[np.newaxis, np.newaxis, :], axis=-1) for ref in bg_refs]
+    min_bg_dist = np.min(np.stack(bg_dists, axis=-1), axis=-1)
+    bg_dist_norm = np.clip(min_bg_dist / (float(np.percentile(min_bg_dist, 92)) or 1.0), 0.0, 1.0)
+
+    border_spread = float(np.percentile(np.linalg.norm(border_lab - np.median(border_lab, axis=0), axis=-1), 75))
+    has_uniform_backdrop = border_spread < 18.0
+
+    yy, xx = np.mgrid[0:h, 0:w]
+    cy, cx = h * 0.50, w * 0.50
+    radial = np.hypot((yy - cy) / (h * 0.50), (xx - cx) / (w * 0.50))
+    center_prior = np.clip(1.20 - 0.45 * (radial ** 2), 0.20, 1.15)
+
     if fg_mask_grid is not None:
         is_subject = fg_mask_grid.copy()
-    elif has_clean_backdrop:
-        # Everything distinct from the uniform outer backdrop is part of the elevated 3D subject
-        raw_subj = dist_to_bg > max(14.0, border_spread * 2.2)
-        subj_img = Image.fromarray((raw_subj.astype(np.uint8) * 255), mode="L")
-        subj_img = subj_img.filter(ImageFilter.MaxFilter(size=3)).filter(ImageFilter.MinFilter(size=3))
-        is_subject = np.asarray(subj_img) > 127
+    elif has_uniform_backdrop:
+        raw_subj = min_bg_dist > max(13.0, border_spread * 2.1)
+        s_img = Image.fromarray((raw_subj.astype(np.uint8) * 255), mode="L")
+        s_img = s_img.filter(ImageFilter.MaxFilter(size=3)).filter(ImageFilter.MinFilter(size=3))
+        is_subject = np.asarray(s_img) > 127
     else:
-        is_subject = np.ones((h, w), dtype=bool)
+        # For complex/blurry real-world photos: combine color contrast from border, focus sharpness, and center prior
+        subject_likelihood = (0.45 * bg_dist_norm + 0.35 * focus_map + 0.20 * chroma_norm) * center_prior
+        subj_cutoff = float(np.quantile(subject_likelihood, 0.36))
+        raw_subj = subject_likelihood >= subj_cutoff
+        s_img = Image.fromarray((raw_subj.astype(np.uint8) * 255), mode="L")
+        s_img = s_img.filter(ImageFilter.MedianFilter(size=5)).filter(ImageFilter.MaxFilter(size=3))
+        is_subject = np.asarray(s_img) > 127
 
-    if has_clean_backdrop and np.any(is_subject) and np.mean(is_subject) < 0.85:
-        # Boxed Subject / Logo / Graphic Relief Mode:
-        # Background = Layer 1; Subject Body & Boxed Letter Faces = Top Layer (z_layers);
-        # Internal Box Outlines / Shaded Side Panels = Mid Layer (z_layers - 1)
+    # 2. CASE A: Clean Graphic Logo / Boxed Icon (like REGO.jpg)
+    if has_uniform_backdrop and np.any(is_subject) and np.mean(is_subject) < 0.82:
         z_grid = np.ones((h, w), dtype=np.int32)
         mid_z = max(1, z_layers - 1)
-
         subj_L = img_lab[..., 0][is_subject]
         shade_cutoff = float(np.percentile(subj_L, 28)) if len(subj_L) > 0 else 40.0
         is_shaded_panel = is_subject & (img_lab[..., 0] <= shade_cutoff)
 
-        # Elevate entire subject to top plateau first
         z_grid[is_subject] = z_layers
-        # Step down shaded side walls and internal box/letter contour grooves by 1 layer
         if z_layers >= 3:
             z_grid[is_shaded_panel] = mid_z
             if groove_mask is not None:
@@ -566,31 +621,58 @@ def compute_stable_terrace_z_grid(
             z_grid[is_subject & groove_mask] = 1
         return z_grid
 
-    # Fallback for full-bleed photographs without a uniform backdrop
-    lum_norm = np.clip(img_lab[..., 0] / 100.0, 0.0, 1.0)
+    # 3. CASE B: Complex / Blurry Photo — Allocate Layers by Distinct Detail + Focus + Tone
     edge_max = float(np.max(edge_map)) or 1.0
     edge_norm = edge_map / edge_max
 
     if z_mode == "invert_luminance":
-        raw_score = 0.75 * (1.0 - lum_norm) + 0.25 * edge_norm
+        tone_score = 1.0 - lum_norm
     elif z_mode == "edge_relief":
-        raw_score = 0.35 * lum_norm + 0.65 * edge_norm
+        tone_score = 0.30 * lum_norm + 0.70 * detail_band
     else:
-        raw_score = 0.75 * lum_norm + 0.25 * edge_norm
+        tone_score = lum_norm
 
-    score_u8 = np.clip(raw_score * 255.0, 0, 255).astype(np.uint8)
-    score_img = Image.fromarray(score_u8, mode="L").filter(ImageFilter.MedianFilter(size=3))
-    smooth_score = np.asarray(score_img, dtype=np.float32) / 255.0
+    # Fuse local distinct detail (DoG), focus sharpness, chroma, and tone inside the subject
+    detail_elevation_score = (
+        0.38 * detail_band
+        + 0.32 * tone_score
+        + 0.18 * focus_map
+        + 0.12 * edge_norm
+    )
 
-    quantiles = [i / z_layers for i in range(1, z_layers)]
-    cutoffs = np.quantile(smooth_score, quantiles)
-    z_grid = (np.searchsorted(cutoffs, smooth_score) + 1).astype(np.int32)
+    # Smooth slightly so features form buildable multi-stud plateaus instead of single-stud noise
+    s_u8 = np.clip(detail_elevation_score * 255.0, 0, 255).astype(np.uint8)
+    smooth_detail = np.asarray(
+        Image.fromarray(s_u8, mode="L").filter(ImageFilter.MedianFilter(size=3)),
+        dtype=np.float32
+    ) / 255.0
 
+    z_grid = np.ones((h, w), dtype=np.int32)
+    subj_scores = smooth_detail[is_subject]
+
+    if len(subj_scores) > 0:
+        if z_layers == 2:
+            # Layer 1 = Background; Layer 2 = Subject (with recessed contour grooves at Layer 1)
+            z_grid[is_subject] = 2
+        else:
+            # Allocate subject across Layers 2 .. z_layers based on distinct feature percentiles
+            upper_levels = z_layers - 1  # e.g., Layers 2, 3 (or 2, 3, 4)
+            q_points = [i / upper_levels for i in range(1, upper_levels)]
+            cutoffs = np.quantile(subj_scores, q_points)
+            z_grid[is_subject] = (np.searchsorted(cutoffs, smooth_detail[is_subject]) + 2).astype(np.int32)
+
+    # Enforce stepped terrace stability: Layer Z must sit on a slightly wider Layer Z-1 base
+    for lz in range(z_layers, 2, -1):
+        upper_mask = (z_grid >= lz).astype(np.uint8) * 255
+        dilated = Image.fromarray(upper_mask, mode="L").filter(ImageFilter.MaxFilter(size=3))
+        must_support = np.asarray(dilated) > 127
+        z_grid = np.where(must_support & (z_grid < lz - 1), lz - 1, z_grid)
+
+    # Carve sharp dark contour lines / grooves 1 layer down so distinct details stay separated
     if groove_mask is not None and z_layers >= 2:
-        z_grid = np.where(groove_mask & (z_grid > 1), z_grid - 1, z_grid)
+        z_grid = np.where(is_subject & groove_mask & (z_grid > 1), z_grid - 1, z_grid)
 
     return z_grid
-
 
 def build_interlocking_layers(
     nearest_indices: np.ndarray,

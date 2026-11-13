@@ -401,7 +401,7 @@ def filter_background_and_abstract_subject(
     fg_mask = None
 
     try:
-        from rembg import remove
+        from rembg import remove # type: ignore
         rgba = remove(work_img)
         alpha = np.asarray(rgba)[..., 3].astype(np.float32) / 255.0
         if np.mean(alpha > 0.35) > 0.08:

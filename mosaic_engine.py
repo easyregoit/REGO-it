@@ -1280,7 +1280,7 @@ def generate_isometric_manual(
     manual = Image.new("RGB", (page_w, page_h), (228, 240, 248))
     draw = ImageDraw.Draw(manual)
 
-    for idx, st in enumerate(steps):
+   for idx, st in enumerate(steps):
         step_num = st["step_num"]
         br, bc = st["bp_coord"]
         r0, r1, c0, c1 = st["bp_bounds"]
@@ -1292,3 +1292,660 @@ def generate_isometric_manual(
         row_idx = idx // cols
         col_idx = idx % cols
         px0 = col_idx * panel_w
+        py0 = row_idx * panel_h
+        px1 = px0 + panel_w
+        py1 = py0 + panel_h
+
+        draw.rectangle([px0, py0, px1, py1], fill=(228, 240, 248), outline=(255, 255, 255), width=4)
+
+        # 1. Left Parts Callout Box (Wordless: '1x', '2x' quantities only)
+        box_x0, box_y0 = px0 + 22, py0 + 22
+        box_x1, box_y1 = px0 + 308, py0 + 480
+        draw.rounded_rectangle(
+            [box_x0, box_y0, box_x1, box_y1],
+            radius=10,
+            fill=(245, 248, 252),
+            outline=(176, 196, 214),
+            width=2
+        )
+
+        # Step number below the callout box
+        draw.text((box_x0 + 8, box_y1 + 16), f"{step_num}", fill=(25, 32, 42), font=font_step)
+
+        # Wordless Mini Baseplate Quadrant Locator Icon (bottom-left next to step number)
+        if bp_rows > 1 or bp_cols > 1:
+            loc_cell = 14
+            loc_x0 = box_x0 + 86
+            loc_y0 = box_y1 + 14
+            for mr in range(bp_rows):
+                for mc in range(bp_cols):
+                    mx0 = loc_x0 + mc * (loc_cell + 3)
+                    my0 = loc_y0 + mr * (loc_cell + 3)
+                    if mr == br and mc == bc:
+                        fill_c = (245, 178, 36)
+                        out_c = (180, 110, 10)
+                    elif (mr, mc) in intro_bps:
+                        fill_c = (140, 155, 170)
+                        out_c = (85, 95, 108)
+                    else:
+                        fill_c = (220, 228, 236)
+                        out_c = (170, 182, 194)
+                    draw.rectangle([mx0, my0, mx0 + loc_cell, my0 + loc_cell], fill=fill_c, outline=out_c, width=1)
+
+        step_counts = Counter(
+            (p["color_idx"], p["part_key"], p["h"], p["w"], p["is_stud"], p.get("z_span", 1), p.get("shape", "rect"))
+            for p in active_pcs
+        )
+        top_step_parts = step_counts.most_common(10)
+
+        for p_idx, ((c_idx, p_key, ph, pw, is_st, z_sp, shp), qty) in enumerate(top_step_parts):
+            rgb = tuple(int(v) for v in palette_rgb[c_idx])
+            p_col = p_idx % 2
+            p_row = p_idx // 2
+
+            cell_x = box_x0 + 16 + p_col * 136
+            cell_y = box_y0 + 24 + p_row * 86
+
+            _draw_iso_brick(
+                draw, r=0, c=0, h=min(2, ph), w=min(3, pw), z=z_sp,
+                color_rgb=rgb, is_stud=is_st,
+                origin_x=cell_x + 28, origin_y=cell_y + 12 + (6 if z_sp > 1 else 0),
+                u_x=8.2, u_y=4.1, z_px=3.5,
+                is_new_step=False,
+                z_span=z_sp,
+                shape=shp,
+                orient="TL" if shp in ("tri_2x2", "wedge_2x2") else "N"
+            )
+            draw.text((cell_x + 70, cell_y + 8), f"{qty}x", fill=(20, 24, 30), font=font_qty)
+
+        # 2. Main Stage: Isolated Active Baseplate at 2.5x Zoom
+        has_assembly_inset = len(intro_bps) > 1
+        main_vp_x0 = px0 + 324
+        main_vp_y0 = py0 + 24
+        main_vp_x1 = (px1 - 270) if has_assembly_inset else (px1 - 24)
+        main_vp_y1 = py1 - 24
+
+        iso_ox, iso_oy, u_x, u_y, z_px = _compute_iso_viewport_transform(
+            r0, r1, c0, c1, max_z,
+            main_vp_x0, main_vp_y0, main_vp_x1, main_vp_y1,
+            max_ux=13.5
+        )
+
+        _draw_iso_baseplate_tile(
+            draw, r0, r1, c0, c1,
+            iso_ox, iso_oy, u_x, u_y, z_px,
+            is_active_bp=True
+        )
+
+        combined_bp = [(False, p) for p in bp_prior] + [(True, p) for p in active_pcs]
+        combined_bp.sort(
+            key=lambda item: (
+                item[1].get("z", 1),
+                item[1]["r"] + item[1]["c"],
+                item[1]["r"],
+                item[1]["c"]
+            )
+        )
+
+        for is_new, p in combined_bp:
+            rgb = tuple(int(v) for v in palette_rgb[p["color_idx"]])
+            _draw_iso_brick(
+                draw,
+                r=p["r"], c=p["c"], h=p["h"], w=p["w"], z=p.get("z", 1),
+                color_rgb=rgb,
+                is_stud=p["is_stud"],
+                origin_x=iso_ox, origin_y=iso_oy,
+                u_x=u_x, u_y=u_y, z_px=z_px,
+                is_new_step=is_new,
+                z_span=p.get("z_span", 1),
+                shape=p.get("shape", "rect"),
+                orient=p.get("orient")
+            )
+
+        # 3. Progressive Multi-Baseplate Assembly View (Baseplate 1 + 2, then 1 + 2 + 3...)
+        if has_assembly_inset:
+            ins_x0, ins_y0 = px1 - 258, py0 + 24
+            ins_x1, ins_y1 = px1 - 20, py1 - 24
+            draw.rounded_rectangle(
+                [ins_x0, ins_y0, ins_x1, ins_y1],
+                radius=10,
+                fill=(236, 244, 250),
+                outline=(176, 196, 214),
+                width=2
+            )
+
+            min_ir = min(ibr * bp_h for ibr, _ in intro_bps)
+            max_ir = max(min(h, (ibr + 1) * bp_h) for ibr, _ in intro_bps)
+            min_ic = min(ibc * bp_w for _, ibc in intro_bps)
+            max_ic = max(min(w, (ibc + 1) * bp_w) for _, ibc in intro_bps)
+
+            a_ox, a_oy, a_ux, a_uy, a_zpx = _compute_iso_viewport_transform(
+                min_ir, max_ir, min_ic, max_ic, max_z,
+                ins_x0 + 10, ins_y0 + 16, ins_x1 - 10, ins_y1 - 16,
+                max_ux=6.2
+            )
+
+            # Draw only the baseplates introduced so far ( highlighting the current one in gold )
+            for ibr, ibc in sorted(intro_bps, key=lambda item: (item[0] + item[1], item[0], item[1])):
+                ir0, ir1 = ibr * bp_h, min(h, (ibr + 1) * bp_h)
+                ic0, ic1 = ibc * bp_w, min(w, (ibc + 1) * bp_w)
+                _draw_iso_baseplate_tile(
+                    draw, ir0, ir1, ic0, ic1,
+                    a_ox, a_oy, a_ux, a_uy, a_zpx,
+                    is_active_bp=(ibr == br and ibc == bc)
+                )
+
+            combined_global = [(False, p) for p in global_prior] + [(True, p) for p in active_pcs]
+            combined_global.sort(
+                key=lambda item: (
+                    item[1].get("z", 1),
+                    item[1]["r"] + item[1]["c"],
+                    item[1]["r"],
+                    item[1]["c"]
+                )
+            )
+            for is_new, p in combined_global:
+                rgb = tuple(int(v) for v in palette_rgb[p["color_idx"]])
+                _draw_iso_brick(
+                    draw,
+                    r=p["r"], c=p["c"], h=p["h"], w=p["w"], z=p.get("z", 1),
+                    color_rgb=rgb,
+                    is_stud=p["is_stud"],
+                    origin_x=a_ox, origin_y=a_oy,
+                    u_x=a_ux, u_y=a_uy, z_px=a_zpx,
+                    is_new_step=is_new,
+                    z_span=p.get("z_span", 1),
+                    shape=p.get("shape", "rect"),
+                    orient=p.get("orient")
+                )
+
+    # Bottom Section: 2D Color Key & Full Baseplate-Divided Quadrant Map
+    map_y0 = iso_section_h
+    draw.rectangle([0, map_y0, page_w, page_h], fill=(238, 245, 250), outline=(255, 255, 255), width=4)
+
+    color_usage = Counter(p["color_idx"] for p in surface_placements)
+    color_num_map: dict[int, int] = {}
+    for rank_idx, (c_idx, _) in enumerate(color_usage.most_common(), start=1):
+        color_num_map[c_idx] = rank_idx
+
+    leg_x0, leg_y0 = 24, map_y0 + 36
+    leg_x1, leg_y1 = 440, page_h - 24
+    draw.rounded_rectangle(
+        [leg_x0, leg_y0, leg_x1, leg_y1],
+        radius=12,
+        fill=(255, 255, 255),
+        outline=(176, 196, 214),
+        width=2
+    )
+
+    used_colors_sorted = color_usage.most_common()
+    for idx_c, (c_idx, pcs_count) in enumerate(used_colors_sorted[:32]):
+        key_num = color_num_map[c_idx]
+        rgb = tuple(int(v) for v in palette_rgb[c_idx])
+        lum = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
+        txt_col = (20, 24, 30) if lum > 140 else (255, 255, 255)
+
+        sub_col = idx_c // 16
+        sub_row = idx_c % 16
+        sx = leg_x0 + 24 + sub_col * 195
+        sy = leg_y0 + 24 + sub_row * 68
+
+        draw.rounded_rectangle([sx, sy, sx + 44, sy + 44], radius=6, fill=rgb, outline=(60, 70, 80), width=2)
+        num_str = str(key_num)
+        draw.text((sx + (16 if len(num_str) == 1 else 11), sy + 11), num_str, fill=txt_col, font=font_qty)
+        draw.text((sx + 56, sy + 11), f"{pcs_count}x", fill=(25, 32, 40), font=font_qty)
+
+    grid_area_x0 = 480
+    grid_area_y0 = map_y0 + 56
+    max_grid_px = 1120
+    cell_px = max(8, min(max_grid_px // max(h, w), 34))
+    grid_w_px = w * cell_px
+    grid_h_px = h * cell_px
+
+    gx0 = grid_area_x0 + ((page_w - grid_area_x0 - 40) - grid_w_px) // 2
+    gy0 = grid_area_y0 + (1120 - grid_h_px) // 2
+
+    draw.rectangle(
+        [gx0 - 36, gy0 - 36, gx0 + grid_w_px + 16, gy0 + grid_h_px + 16],
+        fill=(255, 255, 255),
+        outline=(160, 180, 200),
+        width=2
+    )
+
+    coord_step = 1 if max(h, w) <= 32 else (2 if max(h, w) <= 64 else 4)
+    for c in range(0, w, coord_step):
+        cx = gx0 + c * cell_px + cell_px // 4
+        draw.text((cx, gy0 - 22), str(c + 1), fill=(70, 85, 100), font=font_small)
+    for r in range(0, h, coord_step):
+        ry = gy0 + r * cell_px + cell_px // 4
+        draw.text((gx0 - 28, ry), str(r + 1), fill=(70, 85, 100), font=font_small)
+
+    for p in surface_placements:
+        r, c, ph, pw = p["r"], p["c"], p["h"], p["w"]
+        c_idx = p["color_idx"]
+        key_num = color_num_map.get(c_idx, 1)
+        rgb = tuple(int(v) for v in palette_rgb[c_idx])
+        bg_rgb = tuple(int(v) for v in palette_rgb[p["bg_color_idx"]])
+        lum = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
+        txt_col = (15, 20, 25) if lum > 140 else (250, 252, 255)
+        seam_col = (30, 35, 42)
+
+        x0 = gx0 + c * cell_px
+        y0 = gy0 + r * cell_px
+        x1 = x0 + pw * cell_px
+        y1 = y0 + ph * cell_px
+
+        if p["shape"] == "qtr_1x1":
+            draw_quarter_tile(draw, x0, y0, x1, y1, rgb, bg_rgb, p["orient"], seam_col)
+        elif p["shape"] in ("tri_2x2", "wedge_2x2"):
+            draw_triangular_2x2(
+                draw, x0, y0, x1, y1,
+                rgb, bg_rgb, p["orient"] or "TL",
+                seam_col, clamp_rgb(rgb, 24), clamp_rgb(rgb, -24), 1
+            )
+        elif p["shape"] in ("slope", "slope_curved"):
+            draw_slope_piece(
+                draw, x0, y0, x1, y1,
+                rgb, p["orient"] or "N",
+                seam_col, is_curved=(p["shape"] == "slope_curved")
+            )
+        elif p["shape"] in ("round_1x1", "round_2x2"):
+            draw.rectangle([x0, y0, x1, y1], fill=(35, 42, 50), outline=(70, 80, 90), width=1)
+            pad = max(1, cell_px // 8)
+            draw.ellipse([x0 + pad, y0 + pad, x1 - pad, y1 - pad], fill=rgb, outline=seam_col, width=2)
+        else:
+            draw.rectangle([x0, y0, x1, y1], fill=rgb, outline=seam_col, width=2)
+
+        if p["is_stud"] and cell_px >= 12:
+            s_pad = max(2, cell_px // 4)
+            ring_col = clamp_rgb(rgb, -32 if lum > 140 else 32)
+            for sr in range(ph):
+                for sc in range(pw):
+                    sx0 = x0 + sc * cell_px + s_pad
+                    sy0 = y0 + sr * cell_px + s_pad
+                    sx1 = x0 + (sc + 1) * cell_px - s_pad
+                    sy1 = y0 + (sr + 1) * cell_px - s_pad
+                    draw.ellipse([sx0, sy0, sx1, sy1], outline=ring_col, width=1)
+
+        label_str = str(key_num)
+        tx = (x0 + x1) // 2 - (4 * len(label_str))
+        ty = (y0 + y1) // 2 - 6
+        draw.text((tx, ty), label_str, fill=txt_col, font=font_small)
+
+    # Draw Baseplate Module Seams in bold gold/red
+    quad_line_col = (220, 38, 38)
+    for r_q in range(bp_h, h, bp_h):
+        qy = gy0 + r_q * cell_px
+        draw.line([(gx0, qy), (gx0 + grid_w_px, qy)], fill=quad_line_col, width=3)
+    for c_q in range(bp_w, w, bp_w):
+        qx = gx0 + c_q * cell_px
+        draw.line([(qx, gy0), (qx, gy0 + grid_h_px)], fill=quad_line_col, width=3)
+
+    draw.rectangle([gx0, gy0, gx0 + grid_w_px, gy0 + grid_h_px], outline=(20, 28, 36), width=3)
+
+    manual.save(output_manual_path, format="PNG")
+    return output_manual_path
+
+
+def delta_e_ciede2000_numpy(lab1: np.ndarray, lab2: np.ndarray) -> np.ndarray:
+    L1, a1, b1 = lab1[..., 0], lab1[..., 1], lab1[..., 2]
+    L2, a2, b2 = lab2[..., 0], lab2[..., 1], lab2[..., 2]
+
+    C1 = np.hypot(a1, b1)
+    C2 = np.hypot(a2, b2)
+    C_bar = 0.5 * (C1 + C2)
+
+    C_bar7 = C_bar ** 7
+    G = 0.5 * (1.0 - np.sqrt(C_bar7 / (C_bar7 + 25.0 ** 7)))
+
+    a1_p = (1.0 + G) * a1
+    a2_p = (1.0 + G) * a2
+    C1_p = np.hypot(a1_p, b1)
+    C2_p = np.hypot(a2_p, b2)
+
+    h1_p = np.degrees(np.arctan2(b1, a1_p)) % 360.0
+    h2_p = np.degrees(np.arctan2(b2, a2_p)) % 360.0
+
+    dL_p = L2 - L1
+    dC_p = C2_p - C1_p
+
+    dh_p = h2_p - h1_p
+    dh_p = np.where(dh_p > 180.0, dh_p - 360.0, dh_p)
+    dh_p = np.where(dh_p < -180.0, dh_p + 360.0, dh_p)
+    dh_p = np.where((C1_p * C2_p) == 0.0, 0.0, dh_p)
+    dH_p = 2.0 * np.sqrt(C1_p * C2_p) * np.sin(np.radians(0.5 * dh_p))
+
+    L_bar_p = 0.5 * (L1 + L2)
+    C_bar_p = 0.5 * (C1_p + C2_p)
+
+    h_sum = h1_p + h2_p
+    h_diff = np.abs(h1_p - h2_p)
+    h_bar_p = np.where(
+        (C1_p * C2_p) == 0.0,
+        h_sum,
+        np.where(h_diff <= 180.0, 0.5 * h_sum, np.where(h_sum < 360.0, 0.5 * (h_sum + 360.0), 0.5 * (h_sum - 360.0)))
+    )
+
+    T = (
+        1.0
+        - 0.17 * np.cos(np.radians(h_bar_p - 30.0))
+        + 0.24 * np.cos(np.radians(2.0 * h_bar_p))
+        + 0.32 * np.cos(np.radians(3.0 * h_bar_p + 6.0))
+        - 0.20 * np.cos(np.radians(4.0 * h_bar_p - 63.0))
+    )
+
+    d_theta = 30.0 * np.exp(-(((h_bar_p - 275.0) / 25.0) ** 2))
+    C_bar_p7 = C_bar_p ** 7
+    R_C = 2.0 * np.sqrt(C_bar_p7 / (C_bar_p7 + 25.0 ** 7))
+
+    L_diff_sq = (L_bar_p - 50.0) ** 2
+    S_L = 1.0 + (0.015 * L_diff_sq) / np.sqrt(20.0 + L_diff_sq)
+    S_C = 1.0 + 0.045 * C_bar_p
+    S_H = 1.0 + 0.015 * C_bar_p * T
+    R_T = -np.sin(np.radians(2.0 * d_theta)) * R_C
+
+    term_L = dL_p / S_L
+    term_C = dC_p / S_C
+    term_H = dH_p / S_H
+
+    return np.sqrt(term_L ** 2 + term_C ** 2 + term_H ** 2 + R_T * term_C * term_H)
+
+
+def generate_brick_mosaic(
+    input_path: str,
+    output_path: str,
+    grid_size: tuple[int, int] | None = None,
+    target_output_px: int = 2400,
+    palette: dict = BRICK_PALETTE,
+    stud_ratio: float = 0.45,
+    merge_tolerance_de: float = 2.2,
+    pre_sharpen: bool = False,
+    z_layers: int = 1,
+    z_mode: str = "luminance",
+    abstract_mode: bool = False,
+    manual_output_path: str | None = None
+) -> tuple[dict, tuple[int, int], int]:
+    img = Image.open(input_path).convert("RGB")
+    img_cropped = center_crop_square(img)
+
+    if img_cropped.width > 512:
+        img_cropped = img_cropped.resize((512, 512), Image.Resampling.BILINEAR)
+
+    palette_keys = list(palette.keys())
+    palette_rgb = np.array(list(palette.values()), dtype=np.uint8)
+    palette_rgb_norm = (palette_rgb.astype(np.float32) / 255.0)[np.newaxis, :, :]
+    palette_lab = rgb2lab_numpy(palette_rgb_norm)[0]
+
+    fg_mask_grid = None
+    bg_palette_idx = 0
+
+    if abstract_mode:
+        if grid_size is None or grid_size[0] > 48:
+            grid_size = (32, 32)
+        img_cropped, fg_mask_256, bg_palette_idx = filter_background_and_abstract_subject(
+            img_cropped, palette_keys
+        )
+        fg_mask_img = Image.fromarray((fg_mask_256.astype(np.uint8) * 255), mode="L").resize(
+            grid_size, Image.Resampling.NEAREST
+        )
+        fg_mask_grid = np.asarray(fg_mask_img) > 127
+        merge_tolerance_de = max(merge_tolerance_de, 5.5)
+    else:
+        if grid_size is None:
+            grid_size = auto_detect_grid_size(img_cropped)
+        if z_layers > 1:
+            neural_mask_256 = extract_neural_foreground_mask(img_cropped)
+            if neural_mask_256 is not None:
+                fg_mask_img = Image.fromarray((neural_mask_256.astype(np.uint8) * 255), mode="L").resize(
+                    grid_size, Image.Resampling.NEAREST
+                )
+                fg_mask_grid = np.asarray(fg_mask_img) > 127
+
+    groove_mask, dark_sub_rgb = detect_boxed_grooves_and_preserve_lines(img_cropped, grid_size)
+
+    if pre_sharpen and not abstract_mode:
+        img_cropped = img_cropped.filter(ImageFilter.UnsharpMask(radius=1.0, percent=80, threshold=4))
+
+    img_small = img_cropped.resize(grid_size, Image.Resampling.LANCZOS)
+    sub_grid_size = (grid_size[0] * 2, grid_size[1] * 2)
+    img_sub = img_cropped.resize(sub_grid_size, Image.Resampling.LANCZOS)
+
+    img_rgb_norm = np.asarray(img_small, dtype=np.float32) / 255.0
+    img_lab = rgb2lab_numpy(img_rgb_norm)
+
+    sub_rgb_norm = np.asarray(img_sub, dtype=np.float32) / 255.0
+    subpixel_lab = rgb2lab_numpy(sub_rgb_norm)
+
+    delta_e = delta_e_ciede2000_numpy(
+        img_lab[:, :, np.newaxis, :],
+        palette_lab[np.newaxis, np.newaxis, :, :]
+    )
+    raw_indices = np.argmin(delta_e, axis=-1)
+
+    dark_sub_lab = rgb2lab_numpy(dark_sub_rgb)
+    dark_de = delta_e_ciede2000_numpy(
+        dark_sub_lab[:, :, np.newaxis, :],
+        palette_lab[np.newaxis, np.newaxis, :, :]
+    )
+    surface_L = palette_lab[raw_indices, 0][..., np.newaxis]
+    cand_L = palette_lab[np.newaxis, np.newaxis, :, 0]
+    not_darker_penalty = np.where(cand_L > (surface_L - 12.0), 100.0, 0.0)
+    dark_indices = np.argmin(dark_de + not_darker_penalty, axis=-1)
+    raw_indices = np.where(groove_mask, dark_indices, raw_indices)
+
+    if abstract_mode and fg_mask_grid is not None:
+        raw_indices = np.where(fg_mask_grid, raw_indices, bg_palette_idx)
+        subj_pixels = raw_indices[fg_mask_grid]
+        if len(subj_pixels) > 0:
+            dominant_colors = [c for c, _ in Counter(subj_pixels.tolist()).most_common(7)]
+            if bg_palette_idx not in dominant_colors:
+                dominant_colors.append(bg_palette_idx)
+            allowed = np.array(dominant_colors, dtype=np.int32)
+            restricted_de = delta_e[:, :, allowed]
+            snapped = allowed[np.argmin(restricted_de, axis=-1)]
+            raw_indices = np.where(fg_mask_grid, snapped, bg_palette_idx)
+
+        black_idx = next((i for i, (cid, _) in enumerate(palette_keys) if cid == 11), 0)
+        raw_indices[0, :] = black_idx
+        raw_indices[-1, :] = black_idx
+        raw_indices[:, 0] = black_idx
+        raw_indices[:, -1] = black_idx
+
+    edge_map = sobel_edges_numpy(img_rgb_norm)
+    edge_map = np.where(groove_mask, np.max(edge_map) + 1.0, edge_map)
+    nearest_indices = denoise_and_smooth_grid(
+        raw_indices, delta_e, edge_map, merge_tolerance_de=merge_tolerance_de
+    )
+
+    effective_z = max(2, z_layers) if abstract_mode else z_layers
+
+    z_grid = compute_stable_terrace_z_grid(
+        img_lab=img_lab,
+        edge_map=edge_map,
+        grid_size=grid_size,
+        z_layers=effective_z,
+        z_mode=z_mode,
+        fg_mask_grid=fg_mask_grid,
+        groove_mask=groove_mask,
+    )
+
+    if effective_z > 1:
+        stud_mask = (z_grid == np.max(z_grid)) & (z_grid > 1) & (~groove_mask)
+        bg_mask = (z_grid == 1) & (~groove_mask)
+        if np.any(bg_mask):
+            dominant_bg_col = Counter(nearest_indices[bg_mask].tolist()).most_common(1)[0][0]
+            nearest_indices = np.where(bg_mask, dominant_bg_col, nearest_indices)
+    else:
+        threshold = np.quantile(edge_map, 1.0 - stud_ratio)
+        stud_mask = (edge_map >= threshold) & (~groove_mask)
+
+    if abstract_mode and fg_mask_grid is not None:
+        stud_mask = stud_mask & fg_mask_grid
+        stud_mask[0, :] = False
+        stud_mask[-1, :] = False
+        stud_mask[:, 0] = False
+        stud_mask[:, -1] = False
+
+    surface_placements, under_placements = build_interlocking_layers(
+        nearest_indices=nearest_indices,
+        stud_mask=stud_mask,
+        edge_map=edge_map,
+        subpixel_lab=subpixel_lab,
+        palette_lab=palette_lab,
+        palette_keys=palette_keys,
+        z_grid=z_grid,
+        groove_mask=groove_mask,
+    )
+
+    mosaic_img = render_mixed_mosaic(surface_placements, palette_rgb, grid_size, target_output_px=target_output_px)
+    mosaic_img.save(output_path, format="PNG")
+
+    if manual_output_path is None:
+        manual_output_path = output_path.replace("_hd.png", "_manual.png")
+        if manual_output_path == output_path:
+            manual_output_path = output_path + "_manual.png"
+
+    generate_isometric_manual(
+        surface_placements=surface_placements,
+        under_placements=under_placements,
+        palette_keys=palette_keys,
+        palette_rgb=palette_rgb,
+        grid_size=grid_size,
+        output_manual_path=manual_output_path,
+    )
+
+    counts = Counter()
+    for p in surface_placements:
+        counts[(p["color_idx"], p["part_key"])] += 1
+    for u in under_placements:
+        counts[(u["color_idx"], u["part_key"])] += 1
+
+    bom = {}
+    for (color_idx, part_key), count in sorted(counts.items(), key=lambda x: x[1], reverse=True):
+        color_id, color_name = palette_keys[color_idx]
+        part_id, part_name = PART_CATALOG[part_key]
+        bom[(color_id, color_name, part_id, part_name)] = count
+
+    total_studs = int(np.sum(z_grid))
+    return bom, grid_size, total_studs
+
+
+def export_bricklink_xml(
+    bom: dict,
+    xml_output_path: str,
+    grid_size: tuple[int, int] | None = None,
+    include_baseplates: bool = True,
+    baseplate_color_id: int = 85,
+    condition: str = "N"
+) -> str:
+    lines = ["<INVENTORY>"]
+
+    if include_baseplates and grid_size is not None:
+        h, w = grid_size
+        if h % 48 == 0 and w % 48 == 0:
+            bp_id = "4186"
+            bp_qty = (h // 48) * (w // 48)
+            bp_color = baseplate_color_id
+        elif h % 32 == 0 and w % 32 == 0:
+            bp_id = "3811"
+            bp_qty = (h // 32) * (w // 32)
+            bp_color = 11 if baseplate_color_id == 85 else baseplate_color_id
+        else:
+            bp_id, bp_qty, bp_color = None, 0, None
+
+        if bp_id and bp_qty > 0:
+            lines.append("  <ITEM>")
+            lines.append("    <ITEMTYPE>P</ITEMTYPE>")
+            lines.append(f"    <ITEMID>{bp_id}</ITEMID>")
+            lines.append(f"    <COLOR>{bp_color}</COLOR>")
+            lines.append(f"    <MINQTY>{bp_qty}</MINQTY>")
+            if condition:
+                lines.append(f"    <CONDITION>{condition}</CONDITION>")
+            lines.append("  </ITEM>")
+
+    for (color_id, color_name, part_id, part_name), count in bom.items():
+        lines.append(f"  <!-- {count}x {color_name} {part_name} -->")
+        lines.append("  <ITEM>")
+        lines.append("    <ITEMTYPE>P</ITEMTYPE>")
+        lines.append(f"    <ITEMID>{part_id}</ITEMID>")
+        lines.append(f"    <COLOR>{color_id}</COLOR>")
+        lines.append(f"    <MINQTY>{count}</MINQTY>")
+        if condition:
+            lines.append(f"    <CONDITION>{condition}</CONDITION>")
+        lines.append("  </ITEM>")
+
+    lines.append("</INVENTORY>")
+    xml_content = "\n".join(lines)
+
+    with open(xml_output_path, "w", encoding="utf-8") as f:
+        f.write(xml_content)
+
+    return xml_content
+
+
+def create_demo_image(output_path: str = "demo_rego.png") -> str:
+    """
+    Generates a crisp 512x512 studio demo image of the boxed 3D 'RE-GO' brick
+    with angled corners & beveled letter cuts so 2x2 Triangular Tiles (#35787),
+    Wedge Plates (#24299/#24307), and Cheese Slopes (#54200/#85984) shine.
+    """
+    img = Image.new("RGB", (512, 512), (242, 205, 55))
+    draw = ImageDraw.Draw(img)
+
+    red_main = (201, 26, 9)
+    red_side = (145, 18, 12)
+    dark_line = (55, 8, 8)
+
+    # 1. Left shaded 3D side wall & top rim of the brick
+    draw.polygon([(76, 178), (112, 196), (112, 384), (76, 362)], fill=red_side, outline=dark_line, width=4)
+    draw.polygon([(76, 178), (404, 118), (440, 136), (112, 196)], fill=red_main, outline=dark_line, width=4)
+
+    # 2. 6 raised studs along the top rim
+    for i in range(6):
+        sx = 122 + i * 52
+        sy = 168 - i * 9
+        draw.rectangle([sx - 16, sy - 12, sx + 16, sy + 4], fill=red_main, outline=dark_line, width=3)
+        draw.ellipse([sx - 16, sy - 18, sx + 16, sy - 6], fill=red_main, outline=dark_line, width=3)
+
+    # 3. Main front brick face (tilted isometric rectangle)
+    draw.polygon([(112, 196), (440, 136), (440, 324), (112, 384)], fill=red_main, outline=dark_line, width=4)
+
+    # 4. Boxed 'RE-GO' letter panels and carved internal letter grooves
+    for div_x, top_y, bot_y in [(196, 181, 369), (268, 168, 355), (316, 159, 347), (380, 147, 335)]:
+        draw.line([(div_x, top_y), (div_x, bot_y)], fill=dark_line, width=5)
+
+    draw.rectangle([144, 224, 170, 262], fill=red_side, outline=dark_line, width=4)
+    draw.line([(156, 292), (156, 374)], fill=dark_line, width=6)
+
+    draw.line([(224, 222), (266, 214)], fill=dark_line, width=6)
+    draw.line([(224, 278), (266, 270)], fill=dark_line, width=6)
+
+    draw.polygon([(276, 254), (308, 248), (308, 276), (276, 282)], fill=red_main, outline=dark_line, width=5)
+
+    draw.rectangle([338, 196, 360, 304], fill=red_side, outline=dark_line, width=4)
+    draw.line([(350, 248), (378, 244)], fill=dark_line, width=5)
+
+    draw.rectangle([400, 184, 422, 294], fill=red_side, outline=dark_line, width=4)
+
+    img.save(output_path, format="PNG")
+    return output_path
+if __name__ == "__main__":
+    demo_path = create_demo_image("demo_rego.png")
+    print("Running Baseplate-Isolated Manual + Sculpted Slope 3D Test on Demo Image...")
+    bom, grid, studs = generate_brick_mosaic(
+        input_path=demo_path,
+        output_path="test_3d_hd.png",
+        grid_size=(64, 64),
+        z_layers=3,
+        manual_output_path="test_3d_manual.png",
+    )
+    total_pcs = sum(bom.values())
+    saved_pct = (1.0 - total_pcs / max(1, studs)) * 100.0
+    print(f"Done! Grid: {grid} | Stud Volume: {studs} | Pieces: {total_pcs} ({saved_pct:.1f}% saved)")
+    print("\n--- Top Sculpted Slopes, Wedges & Tiles Used ---")
+    for (cid, cname, pid, pname), qty in list(bom.items())[:12]:
+        print(f"  {qty:>4}x  #{pid:<5} {cname} {pname}")
+    try:
+        os.startfile("test_3d_manual.png")
+    except Exception:
+        pass

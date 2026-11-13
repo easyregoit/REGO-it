@@ -400,78 +400,52 @@ def draw_quarter_tile(
 # --- START OF COMBINED CHANGE IN mosaic_engine.py ---
 def extract_neural_foreground_mask(img_pil: Image.Image) -> np.ndarray | None:
     """
-    100% Pure-NumPy + Pillow Iterative Foreground Subject Isolator (Python 3.15 & Render safe):
-    Combines border CIELAB color clustering, local Laplacian focus sharpness, and
-    2-pass GrabCut-style foreground/background probability refinement.
+     Isolates the true foreground subject by comparing every pixel against the outer
+    border color distribution in CIELAB space — WITHOUT any circular radial spotlight
+    that would falsely elevate the background!
     """
     work_img = img_pil.resize((256, 256), Image.Resampling.BILINEAR).convert("RGB")
     rgb_norm = np.asarray(work_img, dtype=np.float32) / 255.0
     lab = rgb2lab_numpy(rgb_norm)
     h, w, _ = lab.shape
 
-    # 1. Local focus/sharpness map (in-focus subject vs. blurry out-of-focus background)
-    gray_u8 = np.clip(
-        (0.2126 * rgb_norm[..., 0] + 0.7152 * rgb_norm[..., 1] + 0.0722 * rgb_norm[..., 2]) * 255.0,
-        0, 255
-    ).astype(np.uint8)
-    pil_g = Image.fromarray(gray_u8, mode="L")
-    g1 = np.asarray(pil_g.filter(ImageFilter.GaussianBlur(radius=1.0)), dtype=np.float32)
-    g2 = np.asarray(pil_g.filter(ImageFilter.GaussianBlur(radius=3.0)), dtype=np.float32)
-    dog = np.abs(g1 - g2)
-    focus_box = Image.fromarray(
-        np.clip((dog / (float(np.percentile(dog, 95)) or 1.0)) * 255.0, 0, 255).astype(np.uint8),
-        mode="L"
-    ).filter(ImageFilter.BoxBlur(radius=6))
-    focus_norm = np.asarray(focus_box, dtype=np.float32) / (float(np.max(focus_box)) or 1.0)
-
-    # 2. Pass 1: Model outer frame background using 6 border color clusters
-    b_pad = 16
+    # Sample the outer 8-pixel perimeter to learn the true background color(s)
+    b_pad = 8
     border_pixels = np.concatenate([
         lab[:b_pad, :, :].reshape(-1, 3),
         lab[-b_pad:, :, :].reshape(-1, 3),
         lab[:, :b_pad, :].reshape(-1, 3),
         lab[:, -b_pad:, :].reshape(-1, 3),
     ], axis=0)
-    step = max(1, len(border_pixels) // 6)
-    bg_centers = [np.median(border_pixels[i * step:(i + 1) * step], axis=0) for i in range(6)]
-    bg_dists = [np.linalg.norm(lab - ref[np.newaxis, np.newaxis, :], axis=-1) for ref in bg_centers]
-    d_bg = np.min(np.stack(bg_dists, axis=-1), axis=-1)
-    d_bg_norm = np.clip(d_bg / (float(np.percentile(d_bg, 92)) or 1.0), 0.0, 1.0)
 
-    yy, xx = np.mgrid[0:h, 0:w]
-    radial = np.hypot((yy - h * 0.50) / (h * 0.48), (xx - w * 0.50) / (w * 0.48))
-    center_prior = np.clip(1.22 - 0.50 * (radial ** 2), 0.12, 1.15)
+    # Cluster border into 4 reference background colors
+    step = max(1, len(border_pixels) // 4)
+    bg_refs = [np.median(border_pixels[i * step:(i + 1) * step], axis=0) for i in range(4)]
+    bg_dists = [np.linalg.norm(lab - ref[np.newaxis, np.newaxis, :], axis=-1) for ref in bg_refs]
+    min_bg_dist = np.min(np.stack(bg_dists, axis=-1), axis=-1)
 
-    # Initial foreground probability
-    init_score = (0.60 * d_bg_norm + 0.40 * focus_norm) * center_prior
-    init_fg = (init_score >= np.quantile(init_score, 0.45)) & (radial < 1.15)
-    init_bg = (init_score < np.quantile(init_score, 0.30)) | (radial >= 1.22)
+    # Measure natural noise in the background border
+    border_noise = float(np.percentile(
+        np.min(np.stack([np.linalg.norm(border_pixels - r[None, :], axis=-1) for r in bg_refs], axis=-1), axis=-1),
+        90
+    ))
 
-    # 3. Pass 2: Iterative GrabCut-lite refinement (compare pixels against refined FG vs. BG colors)
-    if np.any(init_fg) and np.any(init_bg):
-        fg_pts = lab[init_fg]
-        bg_pts = lab[init_bg]
-        fg_step = max(1, len(fg_pts) // 4)
-        bg_step = max(1, len(bg_pts) // 4)
-        fg_refs = [np.median(fg_pts[i * fg_step:(i + 1) * fg_step], axis=0) for i in range(4)]
-        bg_refs2 = [np.median(bg_pts[i * bg_step:(i + 1) * bg_step], axis=0) for i in range(4)]
+    # A pixel is foreground ONLY if its color is genuinely distinct from the border background
+    cutoff = max(14.0, border_noise * 2.5)
+    raw_mask = min_bg_dist > cutoff
 
-        dist_to_fg = np.min(np.stack([np.linalg.norm(lab - r[None, None, :], axis=-1) for r in fg_refs], axis=-1), axis=-1)
-        dist_to_bg = np.min(np.stack([np.linalg.norm(lab - r[None, None, :], axis=-1) for r in bg_refs2], axis=-1), axis=-1)
-
-        fg_likelihood = (dist_to_bg / (dist_to_fg + dist_to_bg + 1e-5)) * (0.75 + 0.25 * focus_norm) * center_prior
-        raw_mask = fg_likelihood >= np.quantile(fg_likelihood, 0.42)
-    else:
-        raw_mask = init_fg
-
-    # Morphological cleanup for smooth, contiguous brick contours
+    # Clean tiny pinholes without creating any circular halo
     mask_img = Image.fromarray((raw_mask.astype(np.uint8) * 255), mode="L")
-    mask_img = mask_img.filter(ImageFilter.MedianFilter(size=9))
-    mask_img = mask_img.filter(ImageFilter.MaxFilter(size=5))
-    mask_img = mask_img.filter(ImageFilter.MinFilter(size=5))
+    mask_img = mask_img.filter(ImageFilter.MedianFilter(size=5))
     fg_mask = np.asarray(mask_img) > 127
 
-    if 0.04 < float(np.mean(fg_mask)) < 0.92:
+    # Never allow the outer 1-stud frame to be marked as elevated foreground
+    fg_mask[0, :] = False
+    fg_mask[-1, :] = False
+    fg_mask[:, 0] = False
+    fg_mask[:, -1] = False
+
+    if 0.03 < float(np.mean(fg_mask)) < 0.90:
         return fg_mask
     return None
 
@@ -480,11 +454,6 @@ def filter_background_and_abstract_subject(
     img_cropped: Image.Image,
     palette_keys: list[tuple[int, str]]
 ) -> tuple[Image.Image, np.ndarray, int]:
-    """
-    Isolates the foreground subject using the cached 4 MB 'u2netp' neural session
-    (with pure-NumPy CIELAB fallback), replaces busy backgrounds with a clean studio
-    brick color, and applies edge-preserving abstraction for 32x32 frame builds.
-    """
     work_img = img_cropped.resize((256, 256), Image.Resampling.BILINEAR)
     fg_mask = extract_neural_foreground_mask(work_img)
 
@@ -493,37 +462,11 @@ def filter_background_and_abstract_subject(
 
     if fg_mask is None:
         h, w, _ = lab.shape
-        b_pad = max(8, h // 12)
-        border_pixels = np.concatenate([
-            lab[:b_pad, :, :].reshape(-1, 3),
-            lab[-b_pad:, :, :].reshape(-1, 3),
-            lab[:, :b_pad, :].reshape(-1, 3),
-            lab[:, -b_pad:, :].reshape(-1, 3),
-        ], axis=0)
-
-        step = max(1, len(border_pixels) // 4)
-        bg_refs = border_pixels[::step][:4]
-        dists = [np.linalg.norm(lab - ref[np.newaxis, np.newaxis, :], axis=-1) for ref in bg_refs]
-        min_bg_dist = np.min(np.stack(dists, axis=-1), axis=-1)
-
-        yy, xx = np.mgrid[0:h, 0:w]
-        cy, cx = h * 0.52, w * 0.50
-        radial = np.hypot((yy - cy) / (h * 0.48), (xx - cx) / (w * 0.45))
-        center_weight = np.clip(1.25 - 0.55 * (radial ** 2), 0.15, 1.15)
-
-        edges = sobel_edges_numpy(rgb_norm)
-        salience = (min_bg_dist * center_weight) + (edges * 14.0)
-        thresh = np.quantile(salience, 0.42)
-        raw_mask = (salience >= thresh) & (radial < 1.18)
-
-        mask_img = Image.fromarray((raw_mask.astype(np.uint8) * 255), mode="L")
-        mask_img = mask_img.filter(ImageFilter.MedianFilter(size=9))
-        mask_img = mask_img.filter(ImageFilter.MaxFilter(size=5))
-        mask_img = mask_img.filter(ImageFilter.MinFilter(size=5))
-        fg_mask = np.asarray(mask_img) > 127
+        fg_mask = np.zeros((h, w), dtype=bool)
+        fg_mask[h // 6:5 * h // 6, w // 6:5 * w // 6] = True
 
     subject_L = float(np.mean(lab[fg_mask, 0])) if np.any(fg_mask) else 50.0
-    preferred_bg_cid = 63 if subject_L > 48.0 else 86  # Dark Blue (#63) or Light Bluish Gray (#86)
+    preferred_bg_cid = 63 if subject_L > 48.0 else 86
     bg_palette_idx = next((i for i, (cid, _) in enumerate(palette_keys) if cid == preferred_bg_cid), 0)
 
     poster_img = work_img.filter(ImageFilter.MedianFilter(size=5))
@@ -538,11 +481,8 @@ def detect_boxed_grooves_and_preserve_lines(
     grid_size: tuple[int, int]
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Detects thin dark outlines, letter boxes, and structural creases at 512x512 BEFORE downsampling
-    so boxed letters (like 'RE-GO') are never washed out by LANCZOS averaging.
-    Returns:
-      - groove_mask (h, w): True where a crisp dark contour/box outline exists on the stud grid.
-      - dark_sub_rgb (h, w, 3): The darkest 20th-percentile RGB color inside each stud cell.
+    Detects only sharp, distinct dark contour lines (like the boxed outlines of 'RE-GO')
+    at 512x512 BEFORE downsampling so thin outlines stay 1-stud wide and crisp.
     """
     gh, gw = grid_size
     factor = max(2, 512 // max(gh, gw))
@@ -551,69 +491,28 @@ def detect_boxed_grooves_and_preserve_lines(
     hi_rgb = np.asarray(hi_img, dtype=np.float32) / 255.0
     hi_gray = 0.2126 * hi_rgb[..., 0] + 0.7152 * hi_rgb[..., 1] + 0.0722 * hi_rgb[..., 2]
 
-    # Black-hat morphological valley detector: local maximum minus pixel brightness catches thin dark lines
     gray_u8 = np.clip(hi_gray * 255.0, 0, 255).astype(np.uint8)
     dilated_u8 = np.asarray(
-        Image.fromarray(gray_u8, mode="L").filter(ImageFilter.MaxFilter(size=max(3, factor | 1))),
+        Image.fromarray(gray_u8, mode="L").filter(ImageFilter.MaxFilter(size=3)),
         dtype=np.float32
     )
     valley_hi = (dilated_u8 - gray_u8.astype(np.float32)) / 255.0
 
-    # Max-pool valley strength per stud cell so 2px outlines survive downsampling
     valley_blocks = valley_hi.reshape(gh, factor, gw, factor)
     max_valley = np.max(valley_blocks, axis=(1, 3))
-    mean_valley = np.mean(valley_blocks, axis=(1, 3))
-    groove_score = 0.70 * max_valley + 0.30 * mean_valley
 
-    # Adaptive threshold: cells with a sharp dark stroke inside a brighter surrounding
-    groove_thresh = max(0.085, float(np.quantile(groove_score, 0.82)))
-    groove_mask = groove_score >= groove_thresh
+    # Strict threshold so only real dark ink outlines / grooves trigger (never flat surfaces)
+    groove_thresh = max(0.11, float(np.quantile(max_valley, 0.90)))
+    groove_mask = max_valley >= groove_thresh
 
-    # Compute the 20th-percentile darkest RGB inside each stud block to color the preserved outline accurately
     rgb_blocks = hi_rgb.reshape(gh, factor, gw, factor, 3).transpose(0, 2, 1, 3, 4).reshape(gh, gw, factor * factor, 3)
     luma_blocks = 0.2126 * rgb_blocks[..., 0] + 0.7152 * rgb_blocks[..., 1] + 0.0722 * rgb_blocks[..., 2]
-    dark_idx = np.argsort(luma_blocks, axis=-1)[:, :, :max(1, (factor * factor) // 5)]
+    dark_idx = np.argsort(luma_blocks, axis=-1)[:, :, :max(1, (factor * factor) // 6)]
     row_idx = np.arange(gh)[:, None, None]
     col_idx = np.arange(gw)[None, :, None]
     dark_sub_rgb = np.mean(rgb_blocks[row_idx, col_idx, dark_idx], axis=2)
 
     return groove_mask, dark_sub_rgb
-
-
-def compute_focus_and_detail_maps(img_rgb_norm: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Extracts two AI perception maps that work even on blurry or low-contrast photos:
-    1. focus_map (0..1): Local high-frequency Laplacian variance — detects what is in-focus
-       vs. blurry background bokeh so blurry areas are never elevated to top layers.
-    2. detail_band (0..1): Multi-scale Difference-of-Gaussians (DoG) that recovers distinct
-       internal features (eyes, noses, mouths, boxed letters) from soft/blurry images.
-    """
-    gray_u8 = np.clip(
-        (0.2126 * img_rgb_norm[..., 0] + 0.7152 * img_rgb_norm[..., 1] + 0.0722 * img_rgb_norm[..., 2]) * 255.0,
-        0, 255
-    ).astype(np.uint8)
-    pil_g = Image.fromarray(gray_u8, mode="L")
-
-    # Multi-scale Gaussian pyramid for Difference-of-Gaussians (DoG) detail recovery
-    g_fine = np.asarray(pil_g.filter(ImageFilter.GaussianBlur(radius=0.8)), dtype=np.float32)
-    g_med = np.asarray(pil_g.filter(ImageFilter.GaussianBlur(radius=2.2)), dtype=np.float32)
-    g_coarse = np.asarray(pil_g.filter(ImageFilter.GaussianBlur(radius=5.0)), dtype=np.float32)
-
-    # DoG captures distinct structural features regardless of overall lighting or blur
-    dog_fine = np.abs(g_fine - g_med)
-    dog_broad = np.abs(g_med - g_coarse)
-    raw_detail = 0.65 * dog_fine + 0.35 * dog_broad
-    detail_max = float(np.percentile(raw_detail, 98)) or 1.0
-    detail_band = np.clip(raw_detail / detail_max, 0.0, 1.0)
-
-    # Local Focus / Sharpness energy (smoothed over neighborhood to find the in-focus subject)
-    lap_energy = np.clip((dog_fine / (float(np.percentile(dog_fine, 95)) or 1.0)) * 255.0, 0, 255).astype(np.uint8)
-    focus_smooth = Image.fromarray(lap_energy, mode="L").filter(ImageFilter.BoxBlur(radius=3))
-    focus_arr = np.asarray(focus_smooth, dtype=np.float32)
-    f_max = float(np.max(focus_arr)) or 1.0
-    focus_map = np.clip(focus_arr / f_max, 0.0, 1.0)
-
-    return focus_map, detail_band
 
 
 def compute_stable_terrace_z_grid(
@@ -626,25 +525,16 @@ def compute_stable_terrace_z_grid(
     groove_mask: np.ndarray | None = None
 ) -> np.ndarray:
     """
-    AI Detail & Focus-Aware 3D Layer Allocator:
-    - Works across sharp logos, portraits, pets, and blurry photos.
-    - Pushes out-of-focus / background regions to Layer Z=1.
-    - Allocates the subject across Layers 2..z_layers by distinct feature salience
-      (mid-tone body on lower terrace, distinct facial/object details on top terrace,
-      and dark contour outlines carved 1 layer down so details never blob together).
+    Clean, Non-Messy 3D Layer Allocator (No circular halos, no noisy bumps):
+    - Layer 1: Entire background (locked flat at Z=1).
+    - Layer z_layers (Top): Main foreground subject & boxed letter faces (solid flat plateau).
+    - Layer z_layers - 1 (Recessed groove): Only dark outline grooves and darker shaded side walls.
     """
     h, w = grid_size
     if z_layers <= 1:
         return np.ones((h, w), dtype=np.int32)
 
-    # Reconstruct normalized RGB approximation from L*a*b* lightness & chroma for focus/detail analysis
-    lum_norm = np.clip(img_lab[..., 0] / 100.0, 0.0, 1.0)
-    chroma = np.hypot(img_lab[..., 1], img_lab[..., 2])
-    chroma_norm = np.clip(chroma / (float(np.percentile(chroma, 95)) or 1.0), 0.0, 1.0)
-    pseudo_rgb = np.stack([lum_norm, lum_norm, chroma_norm], axis=-1)
-    focus_map, detail_band = compute_focus_and_detail_maps(pseudo_rgb)
-
-    # 1. Identify Background vs. Foreground Subject using Border Lab + Focus Map + Center Prior
+    # 1. Measure color distance from the outer border so background is 100% flat at Z=1
     b_pad = max(2, min(h, w) // 12)
     border_lab = np.concatenate([
         img_lab[:b_pad, :, :].reshape(-1, 3),
@@ -653,104 +543,45 @@ def compute_stable_terrace_z_grid(
         img_lab[:, -b_pad:, :].reshape(-1, 3),
     ], axis=0)
 
-    # Cluster border into 3 reference tones (handles two-tone sky/ground or indoor walls)
-    step = max(1, len(border_lab) // 3)
-    bg_refs = [np.median(border_lab[i * step:(i + 1) * step], axis=0) for i in range(3)]
-    bg_dists = [np.linalg.norm(img_lab - ref[np.newaxis, np.newaxis, :], axis=-1) for ref in bg_refs]
-    min_bg_dist = np.min(np.stack(bg_dists, axis=-1), axis=-1)
-    bg_dist_norm = np.clip(min_bg_dist / (float(np.percentile(min_bg_dist, 92)) or 1.0), 0.0, 1.0)
-
-    border_spread = float(np.percentile(np.linalg.norm(border_lab - np.median(border_lab, axis=0), axis=-1), 75))
-    has_uniform_backdrop = border_spread < 18.0
-
-    yy, xx = np.mgrid[0:h, 0:w]
-    cy, cx = h * 0.50, w * 0.50
-    radial = np.hypot((yy - cy) / (h * 0.50), (xx - cx) / (w * 0.50))
-    center_prior = np.clip(1.20 - 0.45 * (radial ** 2), 0.20, 1.15)
-
-    if fg_mask_grid is not None:
-        is_subject = fg_mask_grid.copy()
-    elif has_uniform_backdrop:
-        raw_subj = min_bg_dist > max(13.0, border_spread * 2.1)
-        s_img = Image.fromarray((raw_subj.astype(np.uint8) * 255), mode="L")
-        s_img = s_img.filter(ImageFilter.MaxFilter(size=3)).filter(ImageFilter.MinFilter(size=3))
-        is_subject = np.asarray(s_img) > 127
-    else:
-        # For complex/blurry real-world photos: combine color contrast from border, focus sharpness, and center prior
-        subject_likelihood = (0.45 * bg_dist_norm + 0.35 * focus_map + 0.20 * chroma_norm) * center_prior
-        subj_cutoff = float(np.quantile(subject_likelihood, 0.36))
-        raw_subj = subject_likelihood >= subj_cutoff
-        s_img = Image.fromarray((raw_subj.astype(np.uint8) * 255), mode="L")
-        s_img = s_img.filter(ImageFilter.MedianFilter(size=5)).filter(ImageFilter.MaxFilter(size=3))
-        is_subject = np.asarray(s_img) > 127
-
-    # 2. CASE A: Clean Graphic Logo / Boxed Icon (like REGO.jpg)
-    if has_uniform_backdrop and np.any(is_subject) and np.mean(is_subject) < 0.82:
-        z_grid = np.ones((h, w), dtype=np.int32)
-        mid_z = max(1, z_layers - 1)
-        subj_L = img_lab[..., 0][is_subject]
-        shade_cutoff = float(np.percentile(subj_L, 28)) if len(subj_L) > 0 else 40.0
-        is_shaded_panel = is_subject & (img_lab[..., 0] <= shade_cutoff)
-
-        z_grid[is_subject] = z_layers
-        if z_layers >= 3:
-            z_grid[is_shaded_panel] = mid_z
-            if groove_mask is not None:
-                z_grid[is_subject & groove_mask] = mid_z
-        elif z_layers == 2 and groove_mask is not None:
-            z_grid[is_subject & groove_mask] = 1
-        return z_grid
-
-    # 3. CASE B: Complex / Blurry Photo — Allocate Layers by Distinct Detail + Focus + Tone
-    edge_max = float(np.max(edge_map)) or 1.0
-    edge_norm = edge_map / edge_max
-
-    if z_mode == "invert_luminance":
-        tone_score = 1.0 - lum_norm
-    elif z_mode == "edge_relief":
-        tone_score = 0.30 * lum_norm + 0.70 * detail_band
-    else:
-        tone_score = lum_norm
-
-    # Fuse local distinct detail (DoG), focus sharpness, chroma, and tone inside the subject
-    detail_elevation_score = (
-        0.38 * detail_band
-        + 0.32 * tone_score
-        + 0.18 * focus_map
-        + 0.12 * edge_norm
+    step = max(1, len(border_lab) // 4)
+    bg_refs = [np.median(border_lab[i * step:(i + 1) * step], axis=0) for i in range(4)]
+    min_bg_dist = np.min(
+        np.stack([np.linalg.norm(img_lab - ref[None, None, :], axis=-1) for ref in bg_refs], axis=-1),
+        axis=-1
     )
+    border_noise = float(np.percentile(
+        np.min(np.stack([np.linalg.norm(border_lab - r[None, :], axis=-1) for r in bg_refs], axis=-1), axis=-1),
+        90
+    ))
 
-    # Smooth slightly so features form buildable multi-stud plateaus instead of single-stud noise
-    s_u8 = np.clip(detail_elevation_score * 255.0, 0, 255).astype(np.uint8)
-    smooth_detail = np.asarray(
-        Image.fromarray(s_u8, mode="L").filter(ImageFilter.MedianFilter(size=3)),
-        dtype=np.float32
-    ) / 255.0
+    # Any cell that matches the border color is strictly background (Z=1)
+    is_subject = min_bg_dist > max(14.0, border_noise * 2.5)
+    if fg_mask_grid is not None:
+        is_subject = is_subject & fg_mask_grid
+
+    # Clean tiny 1-stud islands in the subject mask
+    s_img = Image.fromarray((is_subject.astype(np.uint8) * 255), mode="L")
+    s_img = s_img.filter(ImageFilter.MedianFilter(size=3))
+    is_subject = np.asarray(s_img) > 127
 
     z_grid = np.ones((h, w), dtype=np.int32)
-    subj_scores = smooth_detail[is_subject]
+    if not np.any(is_subject):
+        return z_grid
 
-    if len(subj_scores) > 0:
-        if z_layers == 2:
-            # Layer 1 = Background; Layer 2 = Subject (with recessed contour grooves at Layer 1)
-            z_grid[is_subject] = 2
-        else:
-            # Allocate subject across Layers 2 .. z_layers based on distinct feature percentiles
-            upper_levels = z_layers - 1  # e.g., Layers 2, 3 (or 2, 3, 4)
-            q_points = [i / upper_levels for i in range(1, upper_levels)]
-            cutoffs = np.quantile(subj_scores, q_points)
-            z_grid[is_subject] = (np.searchsorted(cutoffs, smooth_detail[is_subject]) + 2).astype(np.int32)
+    # 2. Elevate the entire subject cleanly to the top plateau (z_layers)
+    z_grid[is_subject] = z_layers
 
-    # Enforce stepped terrace stability: Layer Z must sit on a slightly wider Layer Z-1 base
-    for lz in range(z_layers, 2, -1):
-        upper_mask = (z_grid >= lz).astype(np.uint8) * 255
-        dilated = Image.fromarray(upper_mask, mode="L").filter(ImageFilter.MaxFilter(size=3))
-        must_support = np.asarray(dilated) > 127
-        z_grid = np.where(must_support & (z_grid < lz - 1), lz - 1, z_grid)
+    # 3. Step down ONLY the darker shaded side panels and thin contour grooves by 1 layer
+    mid_z = max(1, z_layers - 1)
+    subj_L = img_lab[..., 0][is_subject]
+    if len(subj_L) > 0:
+        # Only step down a region if it is noticeably darker than the main subject face
+        median_L = float(np.median(subj_L))
+        is_darker_side = is_subject & (img_lab[..., 0] < (median_L - 8.0))
+        z_grid[is_darker_side] = mid_z
 
-    # Carve sharp dark contour lines / grooves 1 layer down so distinct details stay separated
-    if groove_mask is not None and z_layers >= 2:
-        z_grid = np.where(is_subject & groove_mask & (z_grid > 1), z_grid - 1, z_grid)
+    if groove_mask is not None:
+        z_grid[is_subject & groove_mask] = mid_z
 
     return z_grid
 
@@ -1667,12 +1498,14 @@ def generate_brick_mosaic(
         groove_mask=groove_mask,
     )
 
-    # 2. Put tactile studs on elevated boxed letters/surfaces, and smooth flat tiles in recessed grooves & background
+   # Put tactile studs ONLY on the highest raised plateau; keep background & grooves smooth flat tiles
     if effective_z > 1:
-        stud_mask = (z_grid == np.max(z_grid)) & (~groove_mask)
-    else:
-        threshold = np.quantile(edge_map, 1.0 - stud_ratio)
-        stud_mask = (edge_map >= threshold) & (~groove_mask)
+        stud_mask = (z_grid == np.max(z_grid)) & (z_grid > 1) & (~groove_mask)
+        # Keep the background color 100% uniform (merges into big 2x4 flat tiles)
+        bg_mask = (z_grid == 1)
+        if np.any(bg_mask):
+            dominant_bg_col = Counter(nearest_indices[bg_mask].tolist()).most_common(1)[0][0]
+            nearest_indices = np.where(bg_mask, dominant_bg_col, nearest_indices)
 
     if abstract_mode and fg_mask_grid is not None:
         stud_mask = stud_mask & fg_mask_grid

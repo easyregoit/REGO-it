@@ -122,13 +122,13 @@ PART_COLOR_WHITELIST = {
 
 def get_baseplate_module_size(grid_size: tuple[int, int]) -> tuple[int, int]:
     """
-    Determines the physical sub-baseplate module dimensions (bp_h, bp_w) based on overall grid size
-    so the manual builds 1 isolated baseplate at a time (Step 1: Baseplate 1, Step 2: Baseplate 1 + 2, etc.):
-    - 32x32 -> 2x2 grid of 16x16 modular baseplates (4 baseplates)
-    - 48x48 -> 2x2 grid of 24x24 baseplate quadrants (4 baseplates)
-    - 64x64 -> 2x2 grid of 32x32 baseplates (4 baseplates)
-    - 96x96 -> 3x3 grid of 32x32 baseplates (9 baseplates)
-    - 128x128 -> 4x4 grid of 32x32 baseplates (16 baseplates)
+    Returns the sub-baseplate module dimensions (bp_h, bp_w) whose seams MUST be
+    overlapped and locked together by Z=1 pieces:
+    - 32x32 -> 2x2 grid of 16x16 baseplate modules
+    - 48x48 -> 2x2 grid of 24x24 baseplate modules
+    - 64x64 -> 2x2 grid of 32x32 baseplates
+    - 96x96 -> 3x3 grid of 32x32 baseplates
+    - 128x128 -> 4x4 grid of 32x32 baseplates
     """
     h, w = grid_size
     if h <= 32 and w <= 32:
@@ -562,17 +562,23 @@ def build_interlocking_layers(
     filler_color_id: int = 86
 ) -> tuple[list[dict], list[dict]]:
     """
-    Packs all layers while strictly respecting physical baseplate module seams (bp_h, bp_w)
-    so each baseplate can be built independently (Step 1: Baseplate 1, Step 2: Baseplate 1 + 2, etc.)
-    without any brick overhanging an unbuilt neighboring baseplate.
+    Packs all layers while GUARANTEEING that Layer Z=1 overlaps and locks every
+    physical baseplate seam (bp_h, bp_w) together:
+    - At Z=1, runs a dedicated Baseplate Seam-Locking Pass across all vertical
+      seams (c = bp_w, 2*bp_w, ...) and horizontal seams (r = bp_h, 2*bp_h, ...)
+      so every pair of adjacent baseplates is physically bridged by Z=1 pieces.
+    - Never restricts pieces to a single baseplate; gives a high score bonus
+      to pieces that bridge baseplate seams and lower-layer seams.
     """
     h, w = nearest_indices.shape
     bp_h, bp_w = get_baseplate_module_size((h, w))
     max_z = int(np.max(z_grid))
     filler_idx = next((idx for idx, (cid, _) in enumerate(palette_keys) if cid == filler_color_id), 0)
 
-    def _within_single_baseplate(r: int, c: int, sh: int, sw: int) -> bool:
-        return ((r // bp_h) == ((r + sh - 1) // bp_h)) and ((c // bp_w) == ((c + sw - 1) // bp_w))
+    def _bridges_baseplate_seam(r: int, c: int, sh: int, sw: int) -> int:
+        cross_r = 1 if (r // bp_h) != ((r + sh - 1) // bp_h) else 0
+        cross_c = 1 if (c // bp_w) != ((c + sw - 1) // bp_w) else 0
+        return cross_r + cross_c
 
     horiz_First = [
         (2, 4, "plate_2x4"), (1, 4, "plate_1x4"), (2, 3, "plate_2x3"),
@@ -602,7 +608,14 @@ def build_interlocking_layers(
 
     occupied = np.zeros((max_z + 1, h, w), dtype=bool)
     seam_grids = np.zeros((max_z + 1, h, w), dtype=np.int32)
-    uid = 1
+
+    # Seed seam_grids[0] with the physical baseplate IDs so Z=1 actively bridges across baseplate seams
+    bp_cols = (w + bp_w - 1) // bp_w
+    for r in range(h):
+        for c in range(w):
+            seam_grids[0, r, c] = (r // bp_h) * bp_cols + (c // bp_w) + 1
+
+    uid = 100
 
     if max_z >= 4:
         brick_under_mask = (z_grid >= 4)
@@ -616,9 +629,7 @@ def build_interlocking_layers(
                     b_key = PLATE_TO_BRICK_KEY[p_key]
                     if not is_part_available(b_key, filler_color_id):
                         continue
-                    if (r + sh <= h and c + sw <= w
-                            and _within_single_baseplate(r, c, sh, sw)
-                            and not np.any(bu_visited[r:r + sh, c:c + sw])):
+                    if r + sh <= h and c + sw <= w and not np.any(bu_visited[r:r + sh, c:c + sw]):
                         best_shape = (sh, sw, p_key)
                         break
                 sh, sw, p_key = best_shape
@@ -639,6 +650,132 @@ def build_interlocking_layers(
                     "is_structural": True,
                 })
 
+    # ==========================================================================
+    # MANDATORY Z=1 BASEPLATE SEAM-OVERLAP PASS (Locks all baseplates together)
+    # ==========================================================================
+    r_seams = list(range(bp_h, h, bp_h))
+    c_seams = list(range(bp_w, w, bp_w))
+
+    def _try_place_z1_seam_bridge(r0: int, c0: int, sh: int, sw: int, force_bridge: bool = False) -> bool:
+        nonlocal uid
+        if r0 < 0 or c0 < 0 or r0 + sh > h or c0 + sw > w:
+            return False
+        if np.any(occupied[1, r0:r0 + sh, c0:c0 + sw]):
+            return False
+
+        reg_z = z_grid[r0:r0 + sh, c0:c0 + sw]
+        # Case A: All cells in this seam bridge have z_grid > 1 -> place a structural #86 plate across the seam
+        if np.all(reg_z > 1):
+            p_key = f"plate_{min(sh, sw)}x{max(sh, sw)}"
+            if not is_part_available(p_key, filler_color_id):
+                p_key = "plate_2x2"
+            occupied[1, r0:r0 + sh, c0:c0 + sw] = True
+            uid += 1
+            seam_grids[1, r0:r0 + sh, c0:c0 + sw] = uid
+            under_placements.append({
+                "r": r0, "c": c0, "h": sh, "w": sw,
+                "z": 1, "z_span": 1,
+                "color_idx": filler_idx,
+                "bg_color_idx": filler_idx,
+                "part_key": p_key,
+                "is_stud": True,
+                "shape": "rect",
+                "orient": None,
+                "is_structural": True,
+            })
+            return True
+
+        # Case B: All cells in this seam bridge are on surface Z=1
+        if np.all(reg_z == 1):
+            reg_grv = groove_mask[r0:r0 + sh, c0:c0 + sw] if groove_mask is not None else np.zeros((sh, sw), dtype=bool)
+            if np.any(reg_grv) and not force_bridge:
+                return False
+            reg_col = nearest_indices[r0:r0 + sh, c0:c0 + sw]
+            if not np.all(reg_col == reg_col[0, 0]):
+                if not force_bridge:
+                    return False
+                # If forced to guarantee baseplate connection across a color split, unify to dominant color
+                dom_col = Counter(reg_col.flatten().tolist()).most_common(1)[0][0]
+                nearest_indices[r0:r0 + sh, c0:c0 + sw] = dom_col
+            col_idx = int(nearest_indices[r0, c0])
+            col_id = palette_keys[col_idx][0]
+            reg_stud = stud_mask[r0:r0 + sh, c0:c0 + sw]
+            is_st = True if force_bridge else bool(reg_stud[0, 0])
+            if not force_bridge and not np.all(reg_stud == is_st):
+                return False
+
+            prefix = "plate" if is_st else "tile"
+            p_key = f"{prefix}_{min(sh, sw)}x{max(sh, sw)}"
+            if not is_part_available(p_key, col_id):
+                p_key = f"plate_{min(sh, sw)}x{max(sh, sw)}"
+                is_st = True
+            occupied[1, r0:r0 + sh, c0:c0 + sw] = True
+            uid += 1
+            seam_grids[1, r0:r0 + sh, c0:c0 + sw] = uid
+            surface_placements.append({
+                "r": r0, "c": c0, "h": sh, "w": sw,
+                "z": 1, "z_span": 1,
+                "color_idx": col_idx,
+                "bg_color_idx": col_idx,
+                "part_key": p_key,
+                "is_stud": is_st,
+                "shape": "rect",
+                "orient": None,
+                "is_structural": False,
+            })
+            return True
+        return False
+
+    # 0A. Lock every 4-baseplate corner intersection first (straddling r_s-1..r_s and c_s-1..c_s)
+    for r_s in r_seams:
+        for c_s in c_seams:
+            for sh, sw, r_off, c_off in [(2, 4, -1, -2), (4, 2, -2, -1), (2, 2, -1, -1)]:
+                if _try_place_z1_seam_bridge(r_s + r_off, c_s + c_off, sh, sw):
+                    break
+
+    # 0B. Lock vertical baseplate seams (straddling c_s - 1 and c_s across the full height)
+    for c_s in c_seams:
+        for r in range(0, h, 2):
+            for sh, sw, c_off in [(2, 4, -2), (1, 4, -2), (2, 2, -1), (1, 2, -1)]:
+                if _try_place_z1_seam_bridge(r, c_s + c_off, sh, sw):
+                    break
+
+    # 0C. Lock horizontal baseplate seams (straddling r_s - 1 and r_s across the full width)
+    for r_s in r_seams:
+        for c in range(0, w, 2):
+            for sh, sw, r_off in [(4, 2, -2), (4, 1, -2), (2, 2, -1), (2, 1, -1)]:
+                if _try_place_z1_seam_bridge(r_s + r_off, c, sh, sw):
+                    break
+
+    # 0D. Safety Guarantee: verify every adjacent baseplate pair has at least 2 Z=1 bridges
+    for c_s in c_seams:
+        for br in range(len(r_seams) + 1):
+            r_start = br * bp_h
+            r_end = min(h, (br + 1) * bp_h)
+            # Check if any placed Z=1 piece already bridges c_s - 1 and c_s in [r_start..r_end)
+            bridged_rows = [
+                r for r in range(r_start, r_end)
+                if occupied[1, r, c_s - 1] and seam_grids[1, r, c_s - 1] == seam_grids[1, r, c_s]
+            ]
+            if len(bridged_rows) < 2:
+                r_mid = max(r_start, min(r_end - 2, (r_start + r_end) // 2 - 1))
+                _try_place_z1_seam_bridge(r_mid, c_s - 1, 2, 2, force_bridge=True)
+
+    for r_s in r_seams:
+        for bc in range(len(c_seams) + 1):
+            c_start = bc * bp_w
+            c_end = min(w, (bc + 1) * bp_w)
+            bridged_cols = [
+                c for c in range(c_start, c_end)
+                if occupied[1, r_s - 1, c] and seam_grids[1, r_s - 1, c] == seam_grids[1, r_s, c]
+            ]
+            if len(bridged_cols) < 2:
+                c_mid = max(c_start, min(c_end - 2, (c_start + c_end) // 2 - 1))
+                _try_place_z1_seam_bridge(r_s - 1, c_mid, 2, 2, force_bridge=True)
+
+    # ==========================================================================
+    # PACK REMAINING CELLS ACROSS LAYERS Z = 1..MAX_Z
+    # ==========================================================================
     for lz in range(1, max_z + 1):
         prev_seam_grid = seam_grids[lz - 1]
         curr_seam_grid = seam_grids[lz].copy()
@@ -657,11 +794,10 @@ def build_interlocking_layers(
                 for sh, sw, part_key in plate_order:
                     if not is_part_available(part_key, filler_color_id):
                         continue
-                    if (r + sh <= h and c + sw <= w
-                            and _within_single_baseplate(r, c, sh, sw)
-                            and not np.any(struct_visited[r:r + sh, c:c + sw])):
-                        bridged = len(np.unique(prev_seam_grid[r:r + sh, c:c + sw])) if lz > 1 else 1
-                        score = (bridged * 35) + (sh * sw * 5)
+                    if r + sh <= h and c + sw <= w and not np.any(struct_visited[r:r + sh, c:c + sw]):
+                        bridged = len(np.unique(prev_seam_grid[r:r + sh, c:c + sw]))
+                        bp_bonus = _bridges_baseplate_seam(r, c, sh, sw) * 120 if lz == 1 else 0
+                        score = bp_bonus + (bridged * 35) + (sh * sw * 5)
                         if score > best_score:
                             best_score = score
                             best_shape = (sh, sw, part_key)
@@ -689,8 +825,6 @@ def build_interlocking_layers(
         # 2A. SCULPTING PASS A: 2x2 Triangular Tiles (#35787) & Wedge Plates (#24299/#24307)
         for r in range(h - 1):
             for c in range(w - 1):
-                if not _within_single_baseplate(r, c, 2, 2):
-                    continue
                 if np.any(surf_visited[r:r + 2, c:c + 2]):
                     continue
                 diag_hit = detect_2x2_diagonal_corner(nearest_indices, z_grid, groove_mask, r, c, lz)
@@ -747,9 +881,7 @@ def build_interlocking_layers(
 
                     slope_dir = "N" if drop_N else ("S" if drop_S else ("W" if drop_W else "E"))
 
-                    if (slope_dir in ("N", "S") and c + 2 <= w
-                            and _within_single_baseplate(r, c, 1, 2)
-                            and not np.any(surf_visited[r:r + 1, c:c + 2])):
+                    if slope_dir in ("N", "S") and c + 2 <= w and not np.any(surf_visited[r:r + 1, c:c + 2]):
                         if (nearest_indices[r, c + 1] == color_idx
                                 and (groove_mask is None or not groove_mask[r, c + 1])
                                 and is_part_available("slope_1x2", color_id)):
@@ -769,9 +901,7 @@ def build_interlocking_layers(
                                 "is_structural": False,
                             })
                             continue
-                    elif (slope_dir in ("E", "W") and r + 2 <= h
-                          and _within_single_baseplate(r, c, 2, 1)
-                          and not np.any(surf_visited[r:r + 2, c:c + 1])):
+                    elif slope_dir in ("E", "W") and r + 2 <= h and not np.any(surf_visited[r:r + 2, c:c + 1]):
                         if (nearest_indices[r + 1, c] == color_idx
                                 and (groove_mask is None or not groove_mask[r + 1, c])
                                 and is_part_available("slope_curved_2x1", color_id)):
@@ -792,7 +922,7 @@ def build_interlocking_layers(
                             })
                             continue
 
-        # 3. PASS C: Interior rectangular plates & flat tiles (locked inside each baseplate module)
+        # 3. PASS C: Interior & cross-seam rectangular plates & flat tiles
         for r in range(h):
             for c in range(w):
                 if surf_visited[r, c]:
@@ -810,7 +940,7 @@ def build_interlocking_layers(
                         continue
                     if is_grv and min(sh, sw) > 1:
                         continue
-                    if r + sh <= h and c + sw <= w and _within_single_baseplate(r, c, sh, sw):
+                    if r + sh <= h and c + sw <= w:
                         reg_vis = surf_visited[r:r + sh, c:c + sw]
                         reg_col = nearest_indices[r:r + sh, c:c + sw]
                         reg_stud = stud_mask[r:r + sh, c:c + sw]
@@ -819,12 +949,13 @@ def build_interlocking_layers(
                                 and np.all(reg_grv)
                                 and np.all(reg_col == color_idx)
                                 and np.all(reg_stud == is_stud)):
-                            bridged = len(np.unique(prev_seam_grid[r:r + sh, c:c + sw])) if lz > 1 else 1
-                            score = (bridged * 30) + (sh * sw * 6)
+                            bridged = len(np.unique(prev_seam_grid[r:r + sh, c:c + sw]))
+                            bp_bonus = _bridges_baseplate_seam(r, c, sh, sw) * 120 if lz == 1 else 0
+                            score = bp_bonus + (bridged * 30) + (sh * sw * 6)
                             if score > best_score:
                                 best_score = score
                                 best_candidate = (sh, sw, part_key)
-                            if bridged >= 2 and sh * sw >= 4:
+                            if bridged >= 2 and sh * sw >= 4 and (lz > 1 or bp_bonus > 0):
                                 break
 
                 if best_candidate is not None:
@@ -1010,53 +1141,57 @@ def render_mixed_mosaic(
     return canvas
 
 
-def _draw_iso_baseplate_tile(
+def _draw_iso_baseplate(
     draw: ImageDraw.ImageDraw,
-    r0: int, r1: int, c0: int, c1: int,
+    h: int, w: int,
     origin_x: float, origin_y: float,
-    u_x: float, u_y: float, z_px: float,
-    is_active_bp: bool = False
+    u_x: float, u_y: float, z_px: float
 ):
     """
-    Draws an individual isolated baseplate module [r0..r1, c0..c1] in 3D isometric space,
-    highlighting the rim in gold if it is the new baseplate currently being built/attached.
+    Draws the unified isometric baseplate grid with bold gold seam lines marking
+    where the individual baseplates (e.g. 32x32 modules) meet underneath Z=1.
     """
     def proj(row: float, col: float, layer_z: float) -> tuple[float, float]:
         return (origin_x + (col - row) * u_x, origin_y + (col + row) * u_y - layer_z * z_px)
 
-    top_col = (114, 118, 124) if is_active_bp else (96, 100, 106)
+    top_col = (108, 112, 116)
     left_col = (82, 86, 90)
     right_col = (64, 68, 72)
-    edge_col = (245, 178, 36) if is_active_bp else (46, 50, 56)
+    edge_col = (48, 52, 56)
 
-    p_top = proj(r0, c0, 0.0)
-    p_right = proj(r0, c1, 0.0)
-    p_front = proj(r1, c1, 0.0)
-    p_left = proj(r1, c0, 0.0)
-    p_left_bot = proj(r1, c0, -0.5)
-    p_front_bot = proj(r1, c1, -0.5)
-    p_right_bot = proj(r0, c1, -0.5)
+    p_top = proj(0, 0, 0.0)
+    p_right = proj(0, w, 0.0)
+    p_front = proj(h, w, 0.0)
+    p_left = proj(h, 0, 0.0)
+    p_left_bot = proj(h, 0, -0.5)
+    p_front_bot = proj(h, w, -0.5)
+    p_right_bot = proj(0, w, -0.5)
 
     draw.polygon([p_left, p_front, p_front_bot, p_left_bot], fill=left_col, outline=edge_col)
     draw.polygon([p_front, p_right, p_right_bot, p_front_bot], fill=right_col, outline=edge_col)
     draw.polygon([p_top, p_right, p_front, p_left], fill=top_col, outline=edge_col)
 
-    grid_line_col = (100, 104, 110) if is_active_bp else (86, 90, 96)
-    for r in range(r0 + 1, r1):
-        draw.line([proj(r, c0, 0.0), proj(r, c1, 0.0)], fill=grid_line_col, width=1)
-    for c in range(c0 + 1, c1):
-        draw.line([proj(r0, c, 0.0), proj(r1, c, 0.0)], fill=grid_line_col, width=1)
+    grid_line_col = (96, 100, 104)
+    for r in range(1, h):
+        draw.line([proj(r, 0, 0.0), proj(r, w, 0.0)], fill=grid_line_col, width=1)
+    for c in range(1, w):
+        draw.line([proj(0, c, 0.0), proj(h, c, 0.0)], fill=grid_line_col, width=1)
 
-    if u_x >= 4.2:
+    # Highlight the physical baseplate seams (bp_h, bp_w) so the builder sees Z=1 bridging them
+    bp_h, bp_w = get_baseplate_module_size((h, w))
+    seam_col = (235, 170, 30)
+    for r_s in range(bp_h, h, bp_h):
+        draw.line([proj(r_s, 0, 0.0), proj(r_s, w, 0.0)], fill=seam_col, width=2)
+    for c_s in range(bp_w, w, bp_w):
+        draw.line([proj(0, c_s, 0.0), proj(h, c_s, 0.0)], fill=seam_col, width=2)
+
+    if u_x >= 4.0:
         srx = max(1.4, u_x * 0.28)
         sry = max(0.8, u_y * 0.28)
-        for r in range(r0, r1):
-            for c in range(c0, c1):
+        for r in range(h):
+            for c in range(w):
                 sx, sy = proj(r + 0.5, c + 0.5, 0.0)
-                draw.ellipse([sx - srx, sy - sry, sx + srx, sy + sry], outline=(88, 92, 98))
-
-    if is_active_bp:
-        draw.line([p_top, p_right, p_front, p_left, p_top], fill=(245, 178, 36), width=2)
+                draw.ellipse([sx - srx, sy - sry, sx + srx, sy + sry], outline=(88, 92, 96))
 
 
 def _draw_iso_brick(
@@ -1163,31 +1298,6 @@ def _get_manual_font(size: int = 16):
         return ImageFont.load_default()
 
 
-def _compute_iso_viewport_transform(
-    min_r: int, max_r: int, min_c: int, max_c: int, max_z: int,
-    vp_x0: float, vp_y0: float, vp_x1: float, vp_y1: float,
-    max_ux: float = 13.5
-) -> tuple[float, float, float, float, float]:
-    """
-    Computes (origin_x, origin_y, u_x, u_y, z_px) so any isolated baseplate [min_r..max_r, min_c..max_c]
-    or group of baseplates fills its viewport rectangle cleanly and centered.
-    """
-    span_units = max(12, (max_c - min_c) + (max_r - min_r))
-    vp_w = max(80.0, vp_x1 - vp_x0)
-    vp_h = max(80.0, vp_y1 - vp_y0)
-
-    u_x = min(max_ux, max(3.8, min((vp_w * 0.88) / span_units, (vp_h * 0.82) / (span_units * 0.52))))
-    u_y = u_x * 0.50
-    z_px = u_x * 0.42
-
-    mid_iso_x = ((min_c - max_r) + (max_c - min_r)) * 0.5 * u_x
-    mid_iso_y = ((min_c + min_r) + (max_c + max_r)) * 0.5 * u_y - (max_z * 0.35) * z_px
-
-    origin_x = (vp_x0 + vp_x1) * 0.5 - mid_iso_x
-    origin_y = (vp_y0 + vp_y1) * 0.5 - mid_iso_y
-    return origin_x, origin_y, u_x, u_y, z_px
-
-
 def generate_isometric_manual(
     surface_placements: list[dict],
     under_placements: list[dict],
@@ -1197,71 +1307,63 @@ def generate_isometric_manual(
     output_manual_path: str
 ) -> str:
     """
-    Baseplate-Isolated Isometric Manual (Single Board Per Step):
-    - Builds 1 isolated baseplate module at a time (Z=1 -> Z=2 -> Z=3), centered
-      in the step panel with no extra total-progress board on the right.
+    100% Wordless 8-Step LEGO-Style Isometric Instruction Manual (Single Unified Board Per Step):
+    - Shows the unified multi-baseplate board centered in each step panel (no second inset board).
+    - Step 1 places the Z=1 baseplate seam-bridging pieces first so all baseplates lock together.
     """
     h, w = grid_size
     bp_h, bp_w = get_baseplate_module_size(grid_size)
-    bp_rows = (h + bp_h - 1) // bp_h
-    bp_cols = (w + bp_w - 1) // bp_w
-
     all_placements = under_placements + surface_placements
     max_z = max((p.get("z", 1) for p in all_placements), default=1)
 
-    font_qty = _get_manual_font(20)
-    font_step = _get_manual_font(30)
+    font_qty = _get_manual_font(18)
+    font_step = _get_manual_font(28)
     font_small = _get_manual_font(13)
 
-    bp_coords = [(br, bc) for br in range(bp_rows) for bc in range(bp_cols)]
+    def _is_seam_bridge(p: dict) -> bool:
+        r, c, ph, pw = p["r"], p["c"], p["h"], p["w"]
+        return ((r // bp_h) != ((r + ph - 1) // bp_h)) or ((c // bp_w) != ((c + pw - 1) // bp_w))
 
-    MAX_PCS_PER_STEP = 55
-    steps = []
-    introduced_bps: list[tuple[int, int]] = []
-    step_num = 0
+    raw_batches: list[list[dict]] = []
+    if max_z == 1:
+        splits_per_layer = {1: 8}
+    elif max_z == 2:
+        splits_per_layer = {1: 4, 2: 4}
+    elif max_z == 3:
+        splits_per_layer = {1: 2, 2: 3, 3: 3}
+    else:
+        splits_per_layer = {lz: 2 for lz in range(1, max_z + 1)}
 
-    for bp_idx, (br, bc) in enumerate(bp_coords, start=1):
-        r0, r1 = br * bp_h, min(h, (br + 1) * bp_h)
-        c0, c1 = bc * bp_w, min(w, (bc + 1) * bp_w)
-
-        bp_pcs = [
-            p for p in all_placements
-            if r0 <= p["r"] < r1 and c0 <= p["c"] < c1
-        ]
-        if not bp_pcs:
+    for lz in range(1, max_z + 1):
+        layer_pcs = [p for p in all_placements if p.get("z", 1) == lz]
+        if not layer_pcs:
             continue
+        # On Z=1, sort baseplate seam-locking pieces first so Step 1 locks the baseplates together
+        layer_pcs.sort(
+            key=lambda p: (
+                0 if (lz == 1 and _is_seam_bridge(p)) else 1,
+                0 if p.get("is_structural", False) else 1,
+                p["r"] + p["c"],
+                p["r"],
+                p["c"]
+            )
+        )
 
-        introduced_bps.append((br, bc))
-        bp_prior_pcs: list[dict] = []
+        num_splits = splits_per_layer.get(lz, 2)
+        chunk_size = max(1, (len(layer_pcs) + num_splits - 1) // num_splits)
+        for s_idx in range(0, len(layer_pcs), chunk_size):
+            raw_batches.append(layer_pcs[s_idx:s_idx + chunk_size])
 
-        for lz in range(1, max_z + 1):
-            layer_bp_pcs = [p for p in bp_pcs if p.get("z", 1) == lz]
-            if not layer_bp_pcs:
-                continue
-
-            layer_bp_pcs.sort(key=lambda p: (0 if p.get("is_structural", False) else 1, p["r"] + p["c"], p["r"], p["c"]))
-
-            num_chunks = max(1, (len(layer_bp_pcs) + MAX_PCS_PER_STEP - 1) // MAX_PCS_PER_STEP)
-            chunk_sz = max(1, (len(layer_bp_pcs) + num_chunks - 1) // num_chunks)
-
-            for s_i in range(0, len(layer_bp_pcs), chunk_sz):
-                batch = layer_bp_pcs[s_i:s_i + chunk_sz]
-                step_num += 1
-                steps.append({
-                    "step_num": step_num,
-                    "bp_idx": bp_idx,
-                    "bp_coord": (br, bc),
-                    "bp_bounds": (r0, r1, c0, c1),
-                    "introduced_bps": list(introduced_bps),
-                    "bp_prior_pcs": list(bp_prior_pcs),
-                    "active_pcs": batch,
-                })
-                bp_prior_pcs.extend(batch)
+    steps = []
+    accumulated: list[dict] = []
+    for step_num, batch in enumerate(raw_batches, start=1):
+        steps.append((step_num, list(accumulated), batch))
+        accumulated.extend(batch)
 
     cols = 2
     rows = (len(steps) + cols - 1) // cols
-    panel_w = 1120
-    panel_h = 580
+    panel_w = 960
+    panel_h = 540
     page_w = panel_w * cols
     iso_section_h = panel_h * rows
     map_section_h = 1240
@@ -1270,14 +1372,7 @@ def generate_isometric_manual(
     manual = Image.new("RGB", (page_w, page_h), (228, 240, 248))
     draw = ImageDraw.Draw(manual)
 
-    for idx, st in enumerate(steps):
-        step_num = st["step_num"]
-        br, bc = st["bp_coord"]
-        r0, r1, c0, c1 = st["bp_bounds"]
-        intro_bps = st["introduced_bps"]
-        bp_prior = st["bp_prior_pcs"]
-        active_pcs = st["active_pcs"]
-
+    for idx, (step_num, prior_pcs, active_pcs) in enumerate(steps):
         row_idx = idx // cols
         col_idx = idx % cols
         px0 = col_idx * panel_w
@@ -1287,9 +1382,8 @@ def generate_isometric_manual(
 
         draw.rectangle([px0, py0, px1, py1], fill=(228, 240, 248), outline=(255, 255, 255), width=4)
 
-        # 1. Left Parts Callout Box (Wordless: '1x', '2x' quantities only)
-        box_x0, box_y0 = px0 + 22, py0 + 22
-        box_x1, box_y1 = px0 + 308, py0 + 480
+        box_x0, box_y0 = px0 + 24, py0 + 24
+        box_x1, box_y1 = px0 + 304, py0 + 445
         draw.rounded_rectangle(
             [box_x0, box_y0, box_x1, box_y1],
             radius=10,
@@ -1298,27 +1392,7 @@ def generate_isometric_manual(
             width=2
         )
 
-        draw.text((box_x0 + 8, box_y1 + 16), f"{step_num}", fill=(25, 32, 42), font=font_step)
-
-        # Small 2x2 quadrant indicator next to the step number showing which baseplate this is
-        if bp_rows > 1 or bp_cols > 1:
-            loc_cell = 14
-            loc_x0 = box_x0 + 86
-            loc_y0 = box_y1 + 14
-            for mr in range(bp_rows):
-                for mc in range(bp_cols):
-                    mx0 = loc_x0 + mc * (loc_cell + 3)
-                    my0 = loc_y0 + mr * (loc_cell + 3)
-                    if mr == br and mc == bc:
-                        fill_c = (245, 178, 36)
-                        out_c = (180, 110, 10)
-                    elif (mr, mc) in intro_bps:
-                        fill_c = (140, 155, 170)
-                        out_c = (85, 95, 108)
-                    else:
-                        fill_c = (220, 228, 236)
-                        out_c = (170, 182, 194)
-                    draw.rectangle([mx0, my0, mx0 + loc_cell, my0 + loc_cell], fill=fill_c, outline=out_c, width=1)
+        draw.text((box_x0 + 8, box_y1 + 14), f"{step_num}", fill=(25, 32, 42), font=font_step)
 
         step_counts = Counter(
             (p["color_idx"], p["part_key"], p["h"], p["w"], p["is_stud"], p.get("z_span", 1), p.get("shape", "rect"))
@@ -1331,41 +1405,33 @@ def generate_isometric_manual(
             p_col = p_idx % 2
             p_row = p_idx // 2
 
-            cell_x = box_x0 + 16 + p_col * 136
-            cell_y = box_y0 + 24 + p_row * 86
+            cell_x = box_x0 + 18 + p_col * 134
+            cell_y = box_y0 + 26 + p_row * 80
 
             _draw_iso_brick(
                 draw, r=0, c=0, h=min(2, ph), w=min(3, pw), z=z_sp,
                 color_rgb=rgb, is_stud=is_st,
-                origin_x=cell_x + 28, origin_y=cell_y + 12 + (6 if z_sp > 1 else 0),
-                u_x=8.2, u_y=4.1, z_px=3.5,
+                origin_x=cell_x + 28, origin_y=cell_y + 10 + (6 if z_sp > 1 else 0),
+                u_x=7.8, u_y=3.9, z_px=3.3,
                 is_new_step=False,
                 z_span=z_sp,
                 shape=shp,
                 orient="TL" if shp in ("tri_2x2", "wedge_2x2") else "N"
             )
-            draw.text((cell_x + 70, cell_y + 8), f"{qty}x", fill=(20, 24, 30), font=font_qty)
+            draw.text((cell_x + 68, cell_y + 8), f"{qty}x", fill=(20, 24, 30), font=font_qty)
 
-        # 2. Main Stage: Single Isolated Active Baseplate Centered in Full Right Area
-        main_vp_x0 = px0 + 328
-        main_vp_y0 = py0 + 28
-        main_vp_x1 = px1 - 28
-        main_vp_y1 = py1 - 28
+        # Single centered isometric board showing all baseplates locked together
+        u_x = min(9.5, max(3.8, 285.0 / max(h, w)))
+        u_y = u_x * 0.50
+        z_px = u_x * 0.40
+        board_pixel_h = (h + w) * u_y
+        iso_center_x = px0 + 632.0
+        iso_origin_y = py0 + (panel_h - board_pixel_h) * 0.5 + 10.0
 
-        iso_ox, iso_oy, u_x, u_y, z_px = _compute_iso_viewport_transform(
-            r0, r1, c0, c1, max_z,
-            main_vp_x0, main_vp_y0, main_vp_x1, main_vp_y1,
-            max_ux=10.5
-        )
+        _draw_iso_baseplate(draw, h, w, iso_center_x, iso_origin_y, u_x, u_y, z_px)
 
-        _draw_iso_baseplate_tile(
-            draw, r0, r1, c0, c1,
-            iso_ox, iso_oy, u_x, u_y, z_px,
-            is_active_bp=True
-        )
-
-        combined_bp = [(False, p) for p in bp_prior] + [(True, p) for p in active_pcs]
-        combined_bp.sort(
+        combined = [(False, p) for p in prior_pcs] + [(True, p) for p in active_pcs]
+        combined.sort(
             key=lambda item: (
                 item[1].get("z", 1),
                 item[1]["r"] + item[1]["c"],
@@ -1374,14 +1440,14 @@ def generate_isometric_manual(
             )
         )
 
-        for is_new, p in combined_bp:
+        for is_new, p in combined:
             rgb = tuple(int(v) for v in palette_rgb[p["color_idx"]])
             _draw_iso_brick(
                 draw,
                 r=p["r"], c=p["c"], h=p["h"], w=p["w"], z=p.get("z", 1),
                 color_rgb=rgb,
                 is_stud=p["is_stud"],
-                origin_x=iso_ox, origin_y=iso_oy,
+                origin_x=iso_center_x, origin_y=iso_origin_y,
                 u_x=u_x, u_y=u_y, z_px=z_px,
                 is_new_step=is_new,
                 z_span=p.get("z_span", 1),
@@ -1389,7 +1455,7 @@ def generate_isometric_manual(
                 orient=p.get("orient")
             )
 
-    # Bottom Section: 2D Color Key & Full Baseplate-Divided Quadrant Map
+    # Bottom Section: 2D Color Key & Full Quadrant Map (showing Z=1 pieces crossing red baseplate seams)
     map_y0 = iso_section_h
     draw.rectangle([0, map_y0, page_w, page_h], fill=(238, 245, 250), outline=(255, 255, 255), width=4)
 
@@ -1399,7 +1465,7 @@ def generate_isometric_manual(
         color_num_map[c_idx] = rank_idx
 
     leg_x0, leg_y0 = 24, map_y0 + 36
-    leg_x1, leg_y1 = 440, page_h - 24
+    leg_x1, leg_y1 = 430, page_h - 24
     draw.rounded_rectangle(
         [leg_x0, leg_y0, leg_x1, leg_y1],
         radius=12,
@@ -1417,7 +1483,7 @@ def generate_isometric_manual(
 
         sub_col = idx_c // 16
         sub_row = idx_c % 16
-        sx = leg_x0 + 24 + sub_col * 195
+        sx = leg_x0 + 24 + sub_col * 190
         sy = leg_y0 + 24 + sub_row * 68
 
         draw.rounded_rectangle([sx, sy, sx + 44, sy + 44], radius=6, fill=rgb, outline=(60, 70, 80), width=2)
@@ -1425,7 +1491,7 @@ def generate_isometric_manual(
         draw.text((sx + (16 if len(num_str) == 1 else 11), sy + 11), num_str, fill=txt_col, font=font_qty)
         draw.text((sx + 56, sy + 11), f"{pcs_count}x", fill=(25, 32, 40), font=font_qty)
 
-    grid_area_x0 = 480
+    grid_area_x0 = 470
     grid_area_y0 = map_y0 + 56
     max_grid_px = 1120
     cell_px = max(8, min(max_grid_px // max(h, w), 34))
@@ -1813,11 +1879,6 @@ def export_bricklink_xml(
 
 
 def create_demo_image(output_path: str = "demo_rego.png") -> str:
-    """
-    Generates a crisp 512x512 studio demo image of the boxed 3D 'RE-GO' brick
-    with angled corners & beveled letter cuts so 2x2 Triangular Tiles (#35787),
-    Wedge Plates (#24299/#24307), and Cheese Slopes (#54200/#85984) shine.
-    """
     img = Image.new("RGB", (512, 512), (242, 205, 55))
     draw = ImageDraw.Draw(img)
 
@@ -1825,21 +1886,17 @@ def create_demo_image(output_path: str = "demo_rego.png") -> str:
     red_side = (145, 18, 12)
     dark_line = (55, 8, 8)
 
-    # 1. Left shaded 3D side wall & top rim of the brick
     draw.polygon([(76, 178), (112, 196), (112, 384), (76, 362)], fill=red_side, outline=dark_line, width=4)
     draw.polygon([(76, 178), (404, 118), (440, 136), (112, 196)], fill=red_main, outline=dark_line, width=4)
 
-    # 2. 6 raised studs along the top rim
     for i in range(6):
         sx = 122 + i * 52
         sy = 168 - i * 9
         draw.rectangle([sx - 16, sy - 12, sx + 16, sy + 4], fill=red_main, outline=dark_line, width=3)
         draw.ellipse([sx - 16, sy - 18, sx + 16, sy - 6], fill=red_main, outline=dark_line, width=3)
 
-    # 3. Main front brick face (tilted isometric rectangle)
     draw.polygon([(112, 196), (440, 136), (440, 324), (112, 384)], fill=red_main, outline=dark_line, width=4)
 
-    # 4. Boxed 'RE-GO' letter panels and carved internal letter grooves
     for div_x, top_y, bot_y in [(196, 181, 369), (268, 168, 355), (316, 159, 347), (380, 147, 335)]:
         draw.line([(div_x, top_y), (div_x, bot_y)], fill=dark_line, width=5)
 
@@ -1858,9 +1915,11 @@ def create_demo_image(output_path: str = "demo_rego.png") -> str:
 
     img.save(output_path, format="PNG")
     return output_path
+
+
 if __name__ == "__main__":
     demo_path = create_demo_image("demo_rego.png")
-    print("Running Baseplate-Isolated Manual + Sculpted Slope 3D Test on Demo Image...")
+    print("Running Z=1 Baseplate Seam-Locking + Sculpted 3D Manual Test...")
     bom, grid, studs = generate_brick_mosaic(
         input_path=demo_path,
         output_path="test_3d_hd.png",
@@ -1871,9 +1930,6 @@ if __name__ == "__main__":
     total_pcs = sum(bom.values())
     saved_pct = (1.0 - total_pcs / max(1, studs)) * 100.0
     print(f"Done! Grid: {grid} | Stud Volume: {studs} | Pieces: {total_pcs} ({saved_pct:.1f}% saved)")
-    print("\n--- Top Sculpted Slopes, Wedges & Tiles Used ---")
-    for (cid, cname, pid, pname), qty in list(bom.items())[:12]:
-        print(f"  {qty:>4}x  #{pid:<5} {cname} {pname}")
     try:
         os.startfile("test_3d_manual.png")
     except Exception:

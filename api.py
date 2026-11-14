@@ -4,7 +4,7 @@ import os
 import tempfile
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from PIL import Image, ImageDraw, ImageFilter
 from mosaic_engine import generate_brick_mosaic, export_bricklink_xml, create_demo_image
 
@@ -142,7 +142,7 @@ def serve_home():
     index_path = os.path.join(script_dir, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)
-    return {"status": "REGO Mosaic Studio Python API v3 (Mandatory Demo + Isometric Manual + 3D Layers) is running"}
+    return {"status": "REGO Mosaic Studio Python API v4 (Auto-Grid Fix + Tongue-and-Groove Manual) is running"}
 
 
 @app.get("/api/demo-image")
@@ -155,10 +155,7 @@ def get_demo_image():
 
 @app.get("/api/demo")
 def get_mandatory_demo_showcase():
-    """
-    Returns the pre-built 3D RE-GO Demo Mosaic + 8-Step Isometric Manual JSON
-    so the Studio always opens with the crisp RE-GO showcase loaded by default.
-    """
+    """Returns the pre-built 3D RE-GO Demo Mosaic + Isometric Manual JSON."""
     demo_path = os.path.join(ORDERS_DIR, "builtin_demo.png")
     create_demo_image(demo_path)
     return _build_mosaic_payload(
@@ -185,46 +182,58 @@ async def create_mosaic(
     abstract_mode: bool = Form(False),
     use_demo: bool = Form(False),
 ):
-    safe_z = max(1, min(4, int(z_layers)))
+    try:
+        safe_z = max(1, min(4, int(z_layers)))
+        fname = getattr(file, "filename", "") or ""
+        is_demo = use_demo or (file is None) or (fname == "") or ("rego_demo" in fname.lower())
 
-    # Mandatory fallback: if no user file is uploaded, always run the built-in RE-GO Demo Pic
-    is_demo = use_demo or (file is None) or (not getattr(file, "filename", ""))
-    if is_demo:
-        demo_tmp = os.path.join(ORDERS_DIR, "builtin_demo.png")
-        create_demo_image(demo_tmp)
-        with open(demo_tmp, "rb") as df:
-            file_bytes = df.read()
-    else:
-        file_bytes = await file.read()
+        if is_demo and (file is None or fname == ""):
+            demo_tmp = os.path.join(ORDERS_DIR, "builtin_demo.png")
+            create_demo_image(demo_tmp)
+            with open(demo_tmp, "rb") as df:
+                file_bytes = df.read()
+        else:
+            file_bytes = await file.read()
 
-    sig = (
-        file_bytes[:4096]
-        + str(len(file_bytes)).encode()
-        + f"_{preset}_{stud_ratio}_z{safe_z}_{z_mode}_abs{abstract_mode}".encode()
-    )
-    order_id = hashlib.md5(sig).hexdigest()[:12]
-    input_path = os.path.join(ORDERS_DIR, f"{order_id}_in.png")
+        sig = (
+            file_bytes[:4096]
+            + str(len(file_bytes)).encode()
+            + f"_{preset}_{stud_ratio}_z{safe_z}_{z_mode}_abs{abstract_mode}".encode()
+        )
+        order_id = hashlib.md5(sig).hexdigest()[:12]
+        input_path = os.path.join(ORDERS_DIR, f"{order_id}_in.png")
 
-    with open(input_path, "wb") as f:
-        f.write(file_bytes)
+        with open(input_path, "wb") as f:
+            f.write(file_bytes)
 
-    grid_size = (32, 32) if abstract_mode else (PRESET_MAP.get(preset, None) or (64, 64 if is_demo else None))
-    result = _build_mosaic_payload(
-        input_path=input_path,
-        order_id=order_id,
-        grid_size=grid_size,
-        stud_ratio=stud_ratio,
-        merge_tolerance=merge_tolerance,
-        safe_z=safe_z,
-        z_mode=z_mode,
-        abstract_mode=abstract_mode,
-        is_demo=is_demo,
-    )
+        # Cleanly resolve grid_size without ever creating a (64, None) tuple
+        if abstract_mode:
+            grid_size = (32, 32)
+        elif preset in PRESET_MAP and PRESET_MAP[preset] is not None:
+            grid_size = PRESET_MAP[preset]
+        elif is_demo:
+            grid_size = (64, 64)
+        else:
+            grid_size = None
 
-    if os.path.exists(input_path):
-        os.remove(input_path)
+        result = _build_mosaic_payload(
+            input_path=input_path,
+            order_id=order_id,
+            grid_size=grid_size,
+            stud_ratio=stud_ratio,
+            merge_tolerance=merge_tolerance,
+            safe_z=safe_z,
+            z_mode=z_mode,
+            abstract_mode=abstract_mode,
+            is_demo=is_demo,
+        )
 
-    return result
+        if os.path.exists(input_path):
+            os.remove(input_path)
+
+        return result
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @app.get("/api/unlock/{order_id}")

@@ -1351,33 +1351,38 @@ def generate_isometric_manual(
             if not bp_pcs:
                 continue
 
+            # Group into 2 fast, clear steps per baseplate:
+            # 1) Layer Z=1 (Foundation + +1/-1 Interlock Lip)
+            # 2) Layers Z=2..max_z (3D Relief, Letter Outlines & Sculpted Slopes)
+            z1_pcs = [p for p in bp_pcs if p.get("z", 1) == 1]
+            upper_pcs = [p for p in bp_pcs if p.get("z", 1) > 1]
+
+            batches = []
+            if z1_pcs:
+                z1_pcs.sort(key=lambda p: (0 if p.get("is_structural", False) else 1, p["r"] + p["c"], p["r"], p["c"]))
+                if not upper_pcs and len(z1_pcs) > 20:
+                    mid = len(z1_pcs) // 2
+                    batches.append(z1_pcs[:mid])
+                    batches.append(z1_pcs[mid:])
+                else:
+                    batches.append(z1_pcs)
+            if upper_pcs:
+                upper_pcs.sort(key=lambda p: (p.get("z", 1), 0 if p.get("is_structural", False) else 1, p["r"] + p["c"]))
+                batches.append(upper_pcs)
+
             bp_prior_pcs: list[dict] = []
-            for lz in range(1, max_z + 1):
-                layer_bp_pcs = [p for p in bp_pcs if p.get("z", 1) == lz]
-                if not layer_bp_pcs:
-                    continue
-
-                layer_bp_pcs.sort(
-                    key=lambda p: (0 if p.get("is_structural", False) else 1, p["r"] + p["c"], p["r"], p["c"])
-                )
-
-                # Split Z=1 into 2 clear steps per baseplate (or 1 step for upper layers)
-                num_chunks = 2 if (lz == 1 and len(layer_bp_pcs) > 35) else 1
-                chunk_sz = max(1, (len(layer_bp_pcs) + num_chunks - 1) // num_chunks)
-
-                for s_i in range(0, len(layer_bp_pcs), chunk_sz):
-                    batch = layer_bp_pcs[s_i:s_i + chunk_sz]
-                    step_num += 1
-                    steps.append({
-                        "step_num": step_num,
-                        "is_final_join": False,
-                        "bp_coord": (br, bc),
-                        "phys_bounds": phys_box,
-                        "brick_bounds": brick_box,
-                        "bp_prior_pcs": list(bp_prior_pcs),
-                        "active_pcs": batch,
-                    })
-                    bp_prior_pcs.extend(batch)
+            for batch in batches:
+                step_num += 1
+                steps.append({
+                    "step_num": step_num,
+                    "is_final_join": False,
+                    "bp_coord": (br, bc),
+                    "phys_bounds": phys_box,
+                    "brick_bounds": brick_box,
+                    "bp_prior_pcs": list(bp_prior_pcs),
+                    "active_pcs": batch,
+                })
+                bp_prior_pcs.extend(batch)
 
     # Final Step: Fit all completed tongue-and-groove baseplates together!
     if bp_rows > 1 or bp_cols > 1:

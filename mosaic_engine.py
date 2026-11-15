@@ -1749,7 +1749,7 @@ def generate_brick_mosaic(
     abstract_mode: bool = False,
     manual_output_path: str | None = None
 ) -> tuple[dict, tuple[int, int], int]:
-    img = Image.open(input_path).convert("RGB")
+    img = ImageOps.exif_transpose(Image.open(input_path)).convert("RGB")
     img_cropped = center_crop_square(img)
 
     if img_cropped.width > 512:

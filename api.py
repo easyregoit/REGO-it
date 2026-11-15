@@ -10,6 +10,17 @@ from mosaic_engine import generate_brick_mosaic, export_bricklink_xml, create_de
 
 app = FastAPI(title="REGO Mosaic Studio API")
 
+import asyncio
+from role_bot import bot as discord_bot, TOKEN as DISCORD_TOKEN
+
+@app.on_event("startup")
+async def start_discord_bot_in_background():
+    if DISCORD_TOKEN:
+        asyncio.create_task(discord_bot.start(DISCORD_TOKEN))
+        print("Started REGO Role Bot background task on Render.")
+    else:
+        print("DISCORD_BOT_TOKEN not set; skipping Discord bot startup.")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

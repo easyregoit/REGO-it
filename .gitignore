@@ -8,3 +8,6 @@ orders/
 auto_push.ps1
 index.html
 web_app.py
+
+role_bot_2.py
+beta_progress.json

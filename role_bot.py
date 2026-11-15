@@ -1,0 +1,350 @@
+import json
+import os
+from pathlib import Path
+import discord
+from discord.ext import commands
+
+# Reads token from Render Environment Variables (do NOT paste raw token here before pushing to GitHub)
+TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
+
+CHANNEL_ID = 1571263054451052786              # #welcome-and-rules channel ID
+MESSAGE_ID = 1571281810086957126              # Welcome post message ID
+ANNOUNCEMENT_CHANNEL_ID = 1571296900324401333 # #beta-tester-promotion channel ID
+
+BETA_ROLE_NAME = "Beta Tester"
+MOD_ROLE_NAME = "REGO MODs"
+VERIFIED_ROLE_NAME = "Member"
+PROGRESS_FILE = Path(__file__).with_name("beta_progress.json")
+
+LANGUAGE_ROLES = {"🗣️ EN", "🗣️ FR", "🗣️ DE", "🗣️ ES", "🗣️ PT", "🗣️ RU"}
+REGION_ROLES = {"🌍 NA", "🌍 SA", "🌍 EU", "🌍 AF", "🌍 AS", "🌍 OC"}
+PLATFORM_ROLES = {"💻 Web / Desktop", "🍎 IOS", "📱 Android"}
+
+TASK_LABELS: dict[str, str] = {
+    "bug-reports": "Add a bug report in any #bug-reports channel",
+    "feature-requests": "Add a feature request in #feature-requests",
+    "preview-renders": "Share a screenshot in #preview-renders",
+    "completed-builds": "Share a build photo in #completed-builds",
+}
+IMAGE_REQUIRED_TASKS = {"preview-renders", "completed-builds"}
+READ_ONLY_CHANNELS = {"announcements", "how-to-order-bricks", "beta-tester-promotion"}
+PRIVATE_STAFF_CHANNELS = {"bot-update"}
+
+EMOJI_TO_ROLES: dict[str, list[str]] = {
+    "🇬🇧": ["🗣️ EN"],
+    "🇫🇷": ["🗣️ FR"],
+    "🇩🇪": ["🗣️ DE"],
+    "🇪🇸": ["🗣️ ES"],
+    "🇵🇹": ["🗣️ PT"],
+    "🇷🇺": ["🗣️ RU"],
+    "🌎": ["🌍 NA"],
+    "🌴": ["🌍 SA"],
+    "🌍": ["🌍 EU"],
+    "🦁": ["🌍 AF"],
+    "🌏": ["🌍 AS"],
+    "🏝️": ["🌍 OC"],
+    "💻": ["💻 Web / Desktop"],
+    "🍎": ["🍎 IOS"],
+    "📱": ["📱 Android"],
+}
+
+intents = discord.Intents.default()
+intents.members = True
+intents.reactions = True
+intents.message_content = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+
+def load_progress() -> dict[str, list[str]]:
+    if PROGRESS_FILE.exists():
+        try:
+            return json.loads(PROGRESS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def save_progress(data: dict[str, list[str]]) -> None:
+    PROGRESS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def format_checklist(completed: list[str]) -> str:
+    return "\n".join(
+        f"{'✅' if key in completed else '⬜'} {label}"
+        for key, label in TASK_LABELS.items()
+    )
+
+
+def get_task_key(channel_name: str) -> str | None:
+    if channel_name.startswith("bug-reports"):
+        return "bug-reports"
+    if channel_name in TASK_LABELS:
+        return channel_name
+    return None
+
+
+def has_all_three_categories(member: discord.Member) -> bool:
+    names = {r.name for r in member.roles}
+    return bool(names & LANGUAGE_ROLES) and bool(names & REGION_ROLES) and bool(names & PLATFORM_ROLES)
+
+
+async def sync_verified_access(guild: discord.Guild, member: discord.Member) -> None:
+    verified_role = discord.utils.get(guild.roles, name=VERIFIED_ROLE_NAME)
+    if verified_role is None:
+        return
+
+    if has_all_three_categories(member):
+        if verified_role not in member.roles:
+            await member.add_roles(verified_role, reason="Picked all 3 welcome role categories")
+    else:
+        if verified_role in member.roles:
+            await member.remove_roles(verified_role, reason="Missing one of the 3 welcome role categories")
+
+
+async def configure_server_gate(guild: discord.Guild) -> None:
+    verified_role = discord.utils.get(guild.roles, name=VERIFIED_ROLE_NAME)
+    if verified_role is None:
+        verified_role = await guild.create_role(
+            name=VERIFIED_ROLE_NAME,
+            reason="Gate role for members who finished all 3 welcome reactions",
+        )
+
+    everyone = guild.default_role
+
+    for channel in guild.text_channels:
+        try:
+            if channel.id == CHANNEL_ID or channel.name == "welcome-and-rules":
+                await channel.set_permissions(
+                    everyone,
+                    view_channel=True,
+                    read_message_history=True,
+                    add_reactions=True,
+                    send_messages=False,
+                )
+            elif channel.name in PRIVATE_STAFF_CHANNELS:
+                await channel.set_permissions(everyone, view_channel=False)
+                await channel.set_permissions(verified_role, view_channel=False)
+            else:
+                await channel.set_permissions(everyone, view_channel=False)
+                is_read_only = channel.name in READ_ONLY_CHANNELS
+                await channel.set_permissions(
+                    verified_role,
+                    view_channel=True,
+                    read_message_history=True,
+                    send_messages=not is_read_only,
+                )
+        except discord.HTTPException as exc:
+            print(f"Could not update permissions on #{channel.name}: {exc}")
+
+
+async def grant_beta_and_announce(guild: discord.Guild, member: discord.Member, reason: str) -> bool:
+    beta_role = discord.utils.get(guild.roles, name=BETA_ROLE_NAME)
+    if beta_role is None:
+        return False
+
+    if beta_role not in member.roles:
+        await member.add_roles(beta_role, reason=reason)
+
+    beta_members = sorted(beta_role.members, key=lambda m: m.display_name.lower())
+    if member not in beta_members:
+        beta_members.append(member)
+    all_beta_mentions = ", ".join(m.mention for m in beta_members) or member.mention
+
+    if ANNOUNCEMENT_CHANNEL_ID:
+        target_channel = bot.get_channel(ANNOUNCEMENT_CHANNEL_ID) or await bot.fetch_channel(ANNOUNCEMENT_CHANNEL_ID)
+        if target_channel:
+            await target_channel.send(
+                f"🎉 **New Beta Tester:** {member.mention} is now a **{BETA_ROLE_NAME}**!\n"
+                f"**All Beta Testers ({len(beta_members)}):** {all_beta_mentions}"
+            )
+    return True
+
+
+@bot.event
+async def on_ready():
+    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+    progress = load_progress()
+
+    for guild in bot.guilds:
+        await configure_server_gate(guild)
+        beta_role = discord.utils.get(guild.roles, name=BETA_ROLE_NAME)
+
+        async for member in guild.fetch_members(limit=None):
+            if member.bot:
+                continue
+            if beta_role and beta_role in member.roles:
+                if len(progress.get(str(member.id), [])) < 2:
+                    try:
+                        await member.remove_roles(beta_role, reason="Stripped auto-assigned Beta Tester role")
+                    except discord.HTTPException:
+                        pass
+            await sync_verified_access(guild, member)
+
+    if CHANNEL_ID and MESSAGE_ID:
+        try:
+            channel = bot.get_channel(CHANNEL_ID) or await bot.fetch_channel(CHANNEL_ID)
+            msg = await channel.fetch_message(MESSAGE_ID)
+            for emoji in EMOJI_TO_ROLES:
+                try:
+                    await msg.add_reaction(emoji)
+                except discord.HTTPException as exc:
+                    print(f"Could not add {emoji}: {exc}")
+
+            # Sync roles for anyone who clicked reactions while the bot was offline
+            for reaction in msg.reactions:
+                role_names = EMOJI_TO_ROLES.get(str(reaction.emoji))
+                if not role_names:
+                    continue
+                roles = [discord.utils.get(channel.guild.roles, name=n) for n in role_names]
+                roles = [r for r in roles if r is not None]
+                if not roles:
+                    continue
+                async for user in reaction.users():
+                    if user.bot:
+                        continue
+                    member = channel.guild.get_member(user.id) or await channel.guild.fetch_member(user.id)
+                    missing = [r for r in roles if r not in member.roles]
+                    if missing:
+                        await member.add_roles(*missing, reason="Synced reaction clicked while offline")
+                    updated_member = await channel.guild.fetch_member(user.id)
+                    await sync_verified_access(channel.guild, updated_member)
+
+            print("Server gate configured and welcome reactions synced.")
+        except discord.HTTPException as exc:
+            print(f"Could not access welcome message: {exc}")
+
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    beta_role = discord.utils.get(member.guild.roles, name=BETA_ROLE_NAME)
+    verified_role = discord.utils.get(member.guild.roles, name=VERIFIED_ROLE_NAME)
+    roles_to_strip = [r for r in (beta_role, verified_role) if r and r in member.roles]
+    if roles_to_strip:
+        try:
+            await member.remove_roles(*roles_to_strip, reason="New join must start as @everyone only")
+        except discord.HTTPException:
+            pass
+
+
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if payload.user_id == bot.user.id or payload.guild_id is None:
+        return
+    if MESSAGE_ID and payload.message_id != MESSAGE_ID:
+        return
+
+    role_names = EMOJI_TO_ROLES.get(str(payload.emoji))
+    if not role_names:
+        return
+
+    guild = bot.get_guild(payload.guild_id)
+    if guild is None:
+        return
+
+    member = payload.member or await guild.fetch_member(payload.user_id)
+    roles = [discord.utils.get(guild.roles, name=n) for n in role_names]
+    roles = [r for r in roles if r is not None]
+    if roles:
+        await member.add_roles(*roles, reason="REGO welcome reaction role")
+        updated_member = await guild.fetch_member(payload.user_id)
+        await sync_verified_access(guild, updated_member)
+
+
+@bot.event
+async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+    if payload.user_id == bot.user.id or payload.guild_id is None:
+        return
+    if MESSAGE_ID and payload.message_id != MESSAGE_ID:
+        return
+
+    role_names = EMOJI_TO_ROLES.get(str(payload.emoji))
+    if not role_names:
+        return
+
+    guild = bot.get_guild(payload.guild_id)
+    if guild is None:
+        return
+
+    member = await guild.fetch_member(payload.user_id)
+    roles = [discord.utils.get(guild.roles, name=n) for n in role_names]
+    roles = [r for r in roles if r is not None]
+    if roles:
+        await member.remove_roles(*roles, reason="Removed welcome reaction role")
+        updated_member = await guild.fetch_member(payload.user_id)
+        await sync_verified_access(guild, updated_member)
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot or message.guild is None:
+        return
+
+    if isinstance(message.channel, discord.TextChannel) and not message.content.startswith("!"):
+        task_key = get_task_key(message.channel.name)
+        if task_key:
+            has_image = bool(message.attachments)
+            if task_key not in IMAGE_REQUIRED_TASKS or has_image:
+                progress = load_progress()
+                user_key = str(message.author.id)
+                completed = progress.get(user_key) or []
+
+                if task_key not in completed:
+                    completed.append(task_key)
+                    progress[user_key] = completed
+                    save_progress(progress)
+
+                    try:
+                        await message.add_reaction("✅")
+                    except discord.HTTPException:
+                        pass
+
+                    if len(completed) >= 2 and isinstance(message.author, discord.Member):
+                        await grant_beta_and_announce(
+                            message.guild,
+                            message.author,
+                            reason="Completed 2/4 Beta Tester checklist tasks",
+                        )
+
+    await bot.process_commands(message)
+
+
+@bot.command(name="checklist")
+async def checklist(ctx: commands.Context, member: discord.Member | None = None):
+    target = member or ctx.author
+    progress = load_progress()
+    completed = progress.get(str(target.id), [])
+    status = "🎉 **Beta Tester Unlocked!**" if len(completed) >= 2 else f"**{len(completed)}/2 boxes checked**"
+    await ctx.send(
+        f"**{target.display_name}'s Beta Checklist ({status}):**\n{format_checklist(completed)}"
+    )
+
+
+@bot.command(name="promote_beta")
+async def promote_beta(ctx: commands.Context, member: discord.Member):
+    if ctx.guild is None:
+        return
+
+    mod_role = discord.utils.get(ctx.guild.roles, name=MOD_ROLE_NAME)
+    is_authorized = ctx.author.guild_permissions.administrator or (
+        mod_role is not None and mod_role in ctx.author.roles
+    )
+    if not is_authorized:
+        await ctx.send(f"Only `{MOD_ROLE_NAME}` or administrators can promote Beta Testers.", delete_after=10)
+        return
+
+    progress = load_progress()
+    user_key = str(member.id)
+    if len(progress.get(user_key, [])) < 2:
+        progress[user_key] = ["bug-reports", "preview-renders"]
+        save_progress(progress)
+
+    ok = await grant_beta_and_announce(ctx.guild, member, reason="Manual promotion by moderator")
+    if not ok:
+        await ctx.send(f"Role `{BETA_ROLE_NAME}` was not found.", delete_after=10)
+
+
+if __name__ == "__main__":
+    if not TOKEN:
+        raise RuntimeError("Set DISCORD_BOT_TOKEN before running role_bot.py")
+    bot.run(TOKEN)

@@ -441,6 +441,50 @@ async def promote_beta(ctx: commands.Context, member: discord.Member):
     if not ok:
         await ctx.send(f"Role `{BETA_ROLE_NAME}` was not found.", delete_after=10)
 
+async def sync_reactions_for_removed_roles(
+    guild: discord.Guild,
+    member: discord.Member,
+    removed_role_names: set[str],
+) -> None:
+    """
+    When roles are manually removed from a member in Discord, remove that member's
+    corresponding reaction emoji on the welcome message so their reaction state resets.
+    """
+    if not removed_role_names or not CHANNEL_ID or not MESSAGE_ID:
+        return
+
+    try:
+        channel = bot.get_channel(CHANNEL_ID) or await bot.fetch_channel(CHANNEL_ID)
+        msg = await channel.fetch_message(MESSAGE_ID)
+    except discord.HTTPException as exc:
+        print(f"Could not fetch welcome message for reaction reset: {exc}")
+        return
+
+    for emoji, mapped_roles in EMOJI_TO_ROLES.items():
+        if any(role_name in removed_role_names for role_name in mapped_roles):
+            try:
+                await msg.remove_reaction(emoji, member)
+            except discord.HTTPException as exc:
+                print(f"Could not reset reaction {emoji} for {member.display_name}: {exc}")
+
+
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    if after.bot or after.guild is None:
+        return
+
+    before_ids = {r.id for r in before.roles}
+    after_ids = {r.id for r in after.roles}
+    removed_ids = before_ids - after_ids
+
+    if not removed_ids:
+        return
+
+    removed_names = {r.name for r in before.roles if r.id in removed_ids}
+    await sync_reactions_for_removed_roles(after.guild, after, removed_names)
+
+    updated_member = await after.guild.fetch_member(after.id)
+    await sync_verified_access(after.guild, updated_member)
 
 if __name__ == "__main__":
     if not TOKEN:

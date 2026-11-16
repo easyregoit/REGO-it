@@ -4,7 +4,6 @@ from pathlib import Path
 import discord
 from discord.ext import commands
 
-# Reads token from Render Environment Variables (do NOT paste raw token here before pushing to GitHub)
 TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
 
 CHANNEL_ID = 1571263054451052786              # #welcome-and-rules channel ID
@@ -16,9 +15,13 @@ MOD_ROLE_NAME = "REGO MODs"
 VERIFIED_ROLE_NAME = "Member"
 PROGRESS_FILE = Path(__file__).with_name("beta_progress.json")
 
+# Highest-to-lowest priority order (keep highest role & strip lower roles when promoted)
+RANK_HIERARCHY = [MOD_ROLE_NAME, BETA_ROLE_NAME, VERIFIED_ROLE_NAME]
+
 LANGUAGE_ROLES = {"🗣️ EN", "🗣️ FR", "🗣️ DE", "🗣️ ES", "🗣️ PT", "🗣️ RU"}
 REGION_ROLES = {"🌍 NA", "🌍 SA", "🌍 EU", "🌍 AF", "🌍 AS", "🌍 OC"}
 PLATFORM_ROLES = {"💻 Web / Desktop", "🍎 IOS", "📱 Android"}
+CATEGORY_GROUPS = [LANGUAGE_ROLES, REGION_ROLES, PLATFORM_ROLES]
 
 TASK_LABELS: dict[str, str] = {
     "bug-reports": "Add a bug report in any #bug-reports channel",
@@ -89,26 +92,97 @@ def has_all_three_categories(member: discord.Member) -> bool:
     return bool(names & LANGUAGE_ROLES) and bool(names & REGION_ROLES) and bool(names & PLATFORM_ROLES)
 
 
+async def get_or_dedupe_role(guild: discord.Guild, role_name: str, reason: str) -> discord.Role | None:
+    """
+    Finds existing roles matching role_name, migrates members off duplicates,
+    deletes duplicate roles with the same name so no extra roles accumulate,
+    and only creates the role if zero exist.
+    """
+    matching = [r for r in guild.roles if r.name == role_name and not r.managed]
+    if not matching:
+        matching = [r for r in guild.roles if r.name == role_name]
+
+    if not matching:
+        try:
+            return await guild.create_role(name=role_name, reason=reason)
+        except discord.HTTPException as exc:
+            print(f"Could not create '{role_name}': {exc}")
+            return None
+
+    # Prefer the highest-position role as the single canonical role
+    matching.sort(key=lambda r: r.position, reverse=True)
+    primary = matching[0]
+
+    for dup in matching[1:]:
+        if dup.managed:
+            continue
+        for m in list(dup.members):
+            try:
+                if primary not in m.roles:
+                    await m.add_roles(primary, reason=f"Consolidated duplicate {role_name}")
+                await m.remove_roles(dup, reason=f"Removed duplicate {role_name}")
+            except discord.HTTPException:
+                pass
+        try:
+            await dup.delete(reason=f"Removed duplicate {role_name} role")
+            print(f"Deleted duplicate '{role_name}' role (ID: {dup.id})")
+        except discord.HTTPException as exc:
+            print(f"Could not delete duplicate '{role_name}': {exc}")
+
+    return primary
+
+
+async def enforce_single_highest_rank(guild: discord.Guild, member: discord.Member) -> None:
+    """
+    Keeps only the highest rank role a member has earned from RANK_HIERARCHY
+    (REGO MODs > Beta Tester > Member) and strips lower rank roles.
+    """
+    member_role_names = {r.name for r in member.roles}
+    highest_rank_name: str | None = None
+    for rank_name in RANK_HIERARCHY:
+        if rank_name in member_role_names:
+            highest_rank_name = rank_name
+            break
+
+    if not highest_rank_name:
+        return
+
+    roles_to_remove = [
+        r for r in member.roles
+        if r.name in RANK_HIERARCHY and r.name != highest_rank_name and not r.managed
+    ]
+    if roles_to_remove:
+        try:
+            await member.remove_roles(
+                *roles_to_remove,
+                reason=f"Stripped lower rank roles in favor of highest role '{highest_rank_name}'",
+            )
+        except discord.HTTPException as exc:
+            print(f"Could not strip lower roles for {member.display_name}: {exc}")
+
+
 async def sync_verified_access(guild: discord.Guild, member: discord.Member) -> None:
     verified_role = discord.utils.get(guild.roles, name=VERIFIED_ROLE_NAME)
+    beta_role = discord.utils.get(guild.roles, name=BETA_ROLE_NAME)
+    mod_role = discord.utils.get(guild.roles, name=MOD_ROLE_NAME)
     if verified_role is None:
         return
 
+    has_higher_rank = any(r and r in member.roles for r in (beta_role, mod_role))
+
     if has_all_three_categories(member):
-        if verified_role not in member.roles:
+        if not has_higher_rank and verified_role not in member.roles:
             await member.add_roles(verified_role, reason="Picked all 3 welcome role categories")
     else:
         if verified_role in member.roles:
             await member.remove_roles(verified_role, reason="Missing one of the 3 welcome role categories")
 
+    await enforce_single_highest_rank(guild, member)
 
-async def configure_server_gate(guild: discord.Guild) -> None:
-    verified_role = discord.utils.get(guild.roles, name=VERIFIED_ROLE_NAME)
+
+async def configure_server_gate(guild: discord.Guild, verified_role: discord.Role | None) -> None:
     if verified_role is None:
-        verified_role = await guild.create_role(
-            name=VERIFIED_ROLE_NAME,
-            reason="Gate role for members who finished all 3 welcome reactions",
-        )
+        return
 
     everyone = guild.default_role
 
@@ -146,16 +220,19 @@ async def grant_beta_and_announce(guild: discord.Guild, member: discord.Member, 
     if beta_role not in member.roles:
         await member.add_roles(beta_role, reason=reason)
 
+    updated_member = await guild.fetch_member(member.id)
+    await enforce_single_highest_rank(guild, updated_member)
+
     beta_members = sorted(beta_role.members, key=lambda m: m.display_name.lower())
-    if member not in beta_members:
-        beta_members.append(member)
-    all_beta_mentions = ", ".join(m.mention for m in beta_members) or member.mention
+    if updated_member not in beta_members:
+        beta_members.append(updated_member)
+    all_beta_mentions = ", ".join(m.mention for m in beta_members) or updated_member.mention
 
     if ANNOUNCEMENT_CHANNEL_ID:
         target_channel = bot.get_channel(ANNOUNCEMENT_CHANNEL_ID) or await bot.fetch_channel(ANNOUNCEMENT_CHANNEL_ID)
         if target_channel:
             await target_channel.send(
-                f"🎉 **New Beta Tester:** {member.mention} is now a **{BETA_ROLE_NAME}**!\n"
+                f"🎉 **New Beta Tester:** {updated_member.mention} is now a **{BETA_ROLE_NAME}**!\n"
                 f"**All Beta Testers ({len(beta_members)}):** {all_beta_mentions}"
             )
     return True
@@ -167,18 +244,26 @@ async def on_ready():
     progress = load_progress()
 
     for guild in bot.guilds:
-        await configure_server_gate(guild)
-        beta_role = discord.utils.get(guild.roles, name=BETA_ROLE_NAME)
+        verified_role = await get_or_dedupe_role(
+            guild, VERIFIED_ROLE_NAME, "Single gate role for verified members"
+        )
+        beta_role = await get_or_dedupe_role(
+            guild, BETA_ROLE_NAME, "Single Beta Tester role"
+        )
+        await configure_server_gate(guild, verified_role)
 
         async for member in guild.fetch_members(limit=None):
             if member.bot:
                 continue
             if beta_role and beta_role in member.roles:
                 if len(progress.get(str(member.id), [])) < 2:
-                    try:
-                        await member.remove_roles(beta_role, reason="Stripped auto-assigned Beta Tester role")
-                    except discord.HTTPException:
-                        pass
+                    mod_role = discord.utils.get(guild.roles, name=MOD_ROLE_NAME)
+                    is_mod = mod_role is not None and mod_role in member.roles
+                    if not is_mod:
+                        try:
+                            await member.remove_roles(beta_role, reason="Stripped unearned Beta Tester role")
+                        except discord.HTTPException:
+                            pass
             await sync_verified_access(guild, member)
 
     if CHANNEL_ID and MESSAGE_ID:
@@ -191,7 +276,6 @@ async def on_ready():
                 except discord.HTTPException as exc:
                     print(f"Could not add {emoji}: {exc}")
 
-            # Sync roles for anyone who clicked reactions while the bot was offline
             for reaction in msg.reactions:
                 role_names = EMOJI_TO_ROLES.get(str(reaction.emoji))
                 if not role_names:
@@ -210,7 +294,7 @@ async def on_ready():
                     updated_member = await channel.guild.fetch_member(user.id)
                     await sync_verified_access(channel.guild, updated_member)
 
-            print("Server gate configured and welcome reactions synced.")
+            print("Server gate configured, duplicate roles cleaned, and welcome reactions synced.")
         except discord.HTTPException as exc:
             print(f"Could not access welcome message: {exc}")
 
@@ -219,7 +303,7 @@ async def on_ready():
 async def on_member_join(member: discord.Member):
     beta_role = discord.utils.get(member.guild.roles, name=BETA_ROLE_NAME)
     verified_role = discord.utils.get(member.guild.roles, name=VERIFIED_ROLE_NAME)
-    roles_to_strip = [r for r in (beta_role, verified_role) if r and r in member.roles]
+    roles_to_strip = [r for r in (beta_role, verified_role) if r and r in member.roles and not r.managed]
     if roles_to_strip:
         try:
             await member.remove_roles(*roles_to_strip, reason="New join must start as @everyone only")
@@ -246,6 +330,20 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     roles = [discord.utils.get(guild.roles, name=n) for n in role_names]
     roles = [r for r in roles if r is not None]
     if roles:
+        # Remove older selection in the same category so only 1 role per category stays
+        for r in roles:
+            for group in CATEGORY_GROUPS:
+                if r.name in group:
+                    old_same_cat = [
+                        existing for existing in member.roles
+                        if existing.name in group and existing.name != r.name and not existing.managed
+                    ]
+                    if old_same_cat:
+                        try:
+                            await member.remove_roles(*old_same_cat, reason="Replaced previous role in same category")
+                        except discord.HTTPException:
+                            pass
+
         await member.add_roles(*roles, reason="REGO welcome reaction role")
         updated_member = await guild.fetch_member(payload.user_id)
         await sync_verified_access(guild, updated_member)

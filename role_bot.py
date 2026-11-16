@@ -33,117 +33,27 @@ IMAGE_REQUIRED_TASKS = {"preview-renders", "completed-builds"}
 READ_ONLY_CHANNELS = {"announcements", "how-to-order-bricks", "beta-tester-promotion"}
 PRIVATE_STAFF_CHANNELS = {"bot-update"}
 
-LANGUAGE_BUTTONS: list[tuple[str, str]] = [
-    ("🇬🇧", "🗣️ EN"),
-    ("🇫🇷", "🗣️ FR"),
-    ("🇩🇪", "🗣️ DE"),
-    ("🇪🇸", "🗣️ ES"),
-    ("🇵🇹", "🗣️ PT"),
-    ("🇷🇺", "🗣️ RU"),
-]
-
-REGION_BUTTONS: list[tuple[str, str]] = [
-    ("🌎", "🌍 NA"),
-    ("🌴", "🌍 SA"),
-    ("🌍", "🌍 EU"),
-    ("🦁", "🌍 AF"),
-    ("🌏", "🌍 AS"),
-    ("🏝️", "🌍 OC"),
-]
-
-PLATFORM_BUTTONS: list[tuple[str, str]] = [
-    ("💻", "💻 Web / Desktop"),
-    ("🍎", "🍎 IOS"),
-    ("📱", "📱 Android"),
-]
-
-ROLE_BUTTON_MAP: dict[str, tuple[str, set[str]]] = {}
-for _emoji, _role_name in LANGUAGE_BUTTONS:
-    ROLE_BUTTON_MAP[f"rego_role:{_role_name}"] = (_role_name, LANGUAGE_ROLES)
-for _emoji, _role_name in REGION_BUTTONS:
-    ROLE_BUTTON_MAP[f"rego_role:{_role_name}"] = (_role_name, REGION_ROLES)
-for _emoji, _role_name in PLATFORM_BUTTONS:
-    ROLE_BUTTON_MAP[f"rego_role:{_role_name}"] = (_role_name, PLATFORM_ROLES)
-
-
-class RolePickerView(discord.ui.View):
-    """Persistent button view with zero reaction counters."""
-
-    def __init__(self):
-        super().__init__(timeout=None)
-        self._add_role_buttons(LANGUAGE_BUTTONS, row=0)
-        self._add_role_buttons(REGION_BUTTONS, row=1)
-        self._add_role_buttons(PLATFORM_BUTTONS, row=2)
-
-    def _add_role_buttons(self, entries: list[tuple[str, str]], row: int) -> None:
-        for emoji, role_name in entries:
-            btn = discord.ui.Button(
-                label=role_name,
-                emoji=emoji,
-                style=discord.ButtonStyle.secondary,
-                custom_id=f"rego_role:{role_name}",
-                row=row,
-            )
-            btn.callback = self._make_callback(role_name)
-            self.add_item(btn)
-
-    def _make_callback(self, target_role_name: str):
-        async def _on_click(interaction: discord.Interaction) -> None:
-            if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-                await interaction.response.send_message(
-                    "This button only works inside the server.", ephemeral=True
-                )
-                return
-
-            _, category_set = ROLE_BUTTON_MAP[f"rego_role:{target_role_name}"]
-            target_role = discord.utils.get(interaction.guild.roles, name=target_role_name)
-            if target_role is None:
-                await interaction.response.send_message(
-                    f"Role `{target_role_name}` was not found on this server.", ephemeral=True
-                )
-                return
-
-            member = await interaction.guild.fetch_member(interaction.user.id)
-            has_target = target_role in member.roles
-
-            try:
-                if has_target:
-                    await member.remove_roles(target_role, reason="Toggled off role via button")
-                    action_text = f"Removed **{target_role_name}**"
-                else:
-                    same_category_to_remove = [
-                        r for r in member.roles
-                        if r.name in category_set and r.name != target_role_name and not r.managed
-                    ]
-                    if same_category_to_remove:
-                        await member.remove_roles(
-                            *same_category_to_remove,
-                            reason="Switched role within same category via button",
-                        )
-                    await member.add_roles(target_role, reason="Selected role via button")
-                    action_text = f"Set **{target_role_name}**"
-
-                updated_member = await interaction.guild.fetch_member(interaction.user.id)
-                await sync_verified_access(interaction.guild, updated_member)
-                unlocked = has_all_three_categories(updated_member)
-                status_note = (
-                    "✅ All 3 categories selected — **Member** access is active!"
-                    if unlocked
-                    else "⬜ Pick 1 **Language**, 1 **Region**, and 1 **Platform** to unlock server channels."
-                )
-                await interaction.response.send_message(
-                    f"{action_text}.\n{status_note}", ephemeral=True
-                )
-            except discord.HTTPException as exc:
-                await interaction.response.send_message(
-                    f"Could not update roles: {exc}", ephemeral=True
-                )
-
-        return _on_click
-
+EMOJI_TO_ROLES: dict[str, list[str]] = {
+    "🇬🇧": ["🗣️ EN"],
+    "🇫🇷": ["🗣️ FR"],
+    "🇩🇪": ["🗣️ DE"],
+    "🇪🇸": ["🗣️ ES"],
+    "🇵🇹": ["🗣️ PT"],
+    "🇷🇺": ["🗣️ RU"],
+    "🌎": ["🌍 NA"],
+    "🌴": ["🌍 SA"],
+    "🌍": ["🌍 EU"],
+    "🦁": ["🌍 AF"],
+    "🌏": ["🌍 AS"],
+    "🏝️": ["🌍 OC"],
+    "💻": ["💻 Web / Desktop"],
+    "🍎": ["🍎 IOS"],
+    "📱": ["📱 Android"],
+}
 
 intents = discord.Intents.default()
 intents.members = True
+intents.reactions = True
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -273,7 +183,7 @@ async def configure_server_gate(guild: discord.Guild, verified_role: discord.Rol
                     everyone,
                     view_channel=True,
                     read_message_history=True,
-                    add_reactions=False,
+                    add_reactions=True,
                     send_messages=False,
                 )
             elif channel.name in PRIVATE_STAFF_CHANNELS:
@@ -318,35 +228,27 @@ async def grant_beta_and_announce(guild: discord.Guild, member: discord.Member, 
     return True
 
 
-async def ensure_button_picker_message(channel: discord.TextChannel) -> None:
-    """Attaches RolePickerView to MESSAGE_ID if present, or posts/reuses a bot button picker."""
-    bot.add_view(RolePickerView())
+async def sync_reactions_for_removed_roles(
+    guild: discord.Guild,
+    member: discord.Member,
+    removed_role_names: set[str],
+) -> None:
+    if not removed_role_names or not CHANNEL_ID or not MESSAGE_ID:
+        return
 
-    if MESSAGE_ID:
-        try:
-            msg = await channel.fetch_message(MESSAGE_ID)
-            if msg.author.id == bot.user.id:
-                await msg.edit(view=RolePickerView())
-                return
-        except discord.HTTPException:
-            pass
+    try:
+        channel = bot.get_channel(CHANNEL_ID) or await bot.fetch_channel(CHANNEL_ID)
+        msg = await channel.fetch_message(MESSAGE_ID)
+    except discord.HTTPException as exc:
+        print(f"Could not fetch welcome message for reaction reset: {exc}")
+        return
 
-    async for old_msg in channel.history(limit=25):
-        if old_msg.author.id == bot.user.id and old_msg.components:
-            await old_msg.edit(
-                content=(
-                    "**Pick Your Roles (Language · Region · Platform)**\n"
-                    "Click 1 button per row to unlock all server channels:"
-                ),
-                view=RolePickerView(),
-            )
-            return
-
-    await channel.send(
-        "**Pick Your Roles (Language · Region · Platform)**\n"
-        "Click 1 button per row to unlock all server channels:",
-        view=RolePickerView(),
-    )
+    for emoji, mapped_roles in EMOJI_TO_ROLES.items():
+        if any(role_name in removed_role_names for role_name in mapped_roles):
+            try:
+                await msg.remove_reaction(emoji, member)
+            except discord.HTTPException as exc:
+                print(f"Could not reset reaction {emoji} for {member.display_name}: {exc}")
 
 
 @bot.event
@@ -377,20 +279,37 @@ async def on_ready():
                             pass
             await sync_verified_access(guild, member)
 
-    if CHANNEL_ID:
+    if CHANNEL_ID and MESSAGE_ID:
         try:
             channel = bot.get_channel(CHANNEL_ID) or await bot.fetch_channel(CHANNEL_ID)
-            if isinstance(channel, discord.TextChannel):
-                if MESSAGE_ID:
-                    try:
-                        msg = await channel.fetch_message(MESSAGE_ID)
-                        await msg.clear_reactions()
-                    except discord.HTTPException:
-                        pass
-                await ensure_button_picker_message(channel)
-            print("Server gate configured, duplicate roles cleaned, and button role picker ready.")
+            msg = await channel.fetch_message(MESSAGE_ID)
+            for emoji in EMOJI_TO_ROLES:
+                try:
+                    await msg.add_reaction(emoji)
+                except discord.HTTPException as exc:
+                    print(f"Could not add {emoji}: {exc}")
+
+            for reaction in msg.reactions:
+                role_names = EMOJI_TO_ROLES.get(str(reaction.emoji))
+                if not role_names:
+                    continue
+                roles = [discord.utils.get(channel.guild.roles, name=n) for n in role_names]
+                roles = [r for r in roles if r is not None]
+                if not roles:
+                    continue
+                async for user in reaction.users():
+                    if user.bot:
+                        continue
+                    member = channel.guild.get_member(user.id) or await channel.guild.fetch_member(user.id)
+                    missing = [r for r in roles if r not in member.roles]
+                    if missing:
+                        await member.add_roles(*missing, reason="Synced reaction clicked while offline")
+                    updated_member = await channel.guild.fetch_member(user.id)
+                    await sync_verified_access(channel.guild, updated_member)
+
+            print("Server gate configured, duplicate roles cleaned, and welcome reactions synced.")
         except discord.HTTPException as exc:
-            print(f"Could not configure welcome channel buttons: {exc}")
+            print(f"Could not access welcome message: {exc}")
 
 
 @bot.event
@@ -406,14 +325,66 @@ async def on_member_join(member: discord.Member):
 
 
 @bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if payload.user_id == bot.user.id or payload.guild_id is None:
+        return
+    if MESSAGE_ID and payload.message_id != MESSAGE_ID:
+        return
+
+    role_names = EMOJI_TO_ROLES.get(str(payload.emoji))
+    if not role_names:
+        return
+
+    guild = bot.get_guild(payload.guild_id)
+    if guild is None:
+        return
+
+    member = payload.member or await guild.fetch_member(payload.user_id)
+    roles = [discord.utils.get(guild.roles, name=n) for n in role_names]
+    roles = [r for r in roles if r is not None]
+    if roles:
+        await member.add_roles(*roles, reason="REGO welcome reaction role")
+        updated_member = await guild.fetch_member(payload.user_id)
+        await sync_verified_access(guild, updated_member)
+
+
+@bot.event
+async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+    if payload.user_id == bot.user.id or payload.guild_id is None:
+        return
+    if MESSAGE_ID and payload.message_id != MESSAGE_ID:
+        return
+
+    role_names = EMOJI_TO_ROLES.get(str(payload.emoji))
+    if not role_names:
+        return
+
+    guild = bot.get_guild(payload.guild_id)
+    if guild is None:
+        return
+
+    member = await guild.fetch_member(payload.user_id)
+    roles = [discord.utils.get(guild.roles, name=n) for n in role_names]
+    roles = [r for r in roles if r is not None]
+    if roles:
+        await member.remove_roles(*roles, reason="Removed welcome reaction role")
+        updated_member = await guild.fetch_member(payload.user_id)
+        await sync_verified_access(guild, updated_member)
+
+
+@bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
     if after.bot or after.guild is None:
         return
 
     before_ids = {r.id for r in before.roles}
     after_ids = {r.id for r in after.roles}
-    if not (before_ids - after_ids):
+    removed_ids = before_ids - after_ids
+    if not removed_ids:
         return
+
+    removed_names = {r.name for r in before.roles if r.id in removed_ids}
+    await sync_reactions_for_removed_roles(after.guild, after, removed_names)
 
     updated_member = await after.guild.fetch_member(after.id)
     await sync_verified_access(after.guild, updated_member)
@@ -491,4 +462,3 @@ if __name__ == "__main__":
     if not TOKEN:
         raise RuntimeError("Set DISCORD_BOT_TOKEN before running role_bot.py")
     bot.run(TOKEN)
-    

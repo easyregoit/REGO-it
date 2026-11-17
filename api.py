@@ -65,19 +65,6 @@ def make_peek_preview(img_path: str, blur_radius: int = 16) -> str:
     return f"data:image/png;base64,{b64}"
 
 
-def make_blurred_manual_teaser(manual_path: str) -> str:
-    """Creates a blurred teaser of the manual for locked user uploads."""
-    img = Image.open(manual_path).convert("RGB")
-    teaser = img.resize((900, int(900 * img.height / max(1, img.width))), Image.Resampling.BILINEAR)
-    teaser = teaser.filter(ImageFilter.GaussianBlur(radius=14))
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-        teaser.save(tmp.name, format="PNG")
-        with open(tmp.name, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode("utf-8")
-    os.remove(tmp.name)
-    return f"data:image/png;base64,{b64}"
-
-
 def _build_mosaic_payload(
     input_path: str,
     order_id: str,
@@ -121,6 +108,7 @@ def _build_mosaic_payload(
     with open(output_manual, "rb") as man_f:
         manual_b64 = f"data:image/png;base64,{base64.b64encode(man_f.read()).decode('utf-8')}"
 
+    peek_b64 = hd_b64 if is_demo else make_peek_preview(output_png, blur_radius=16)
     total_pieces = sum(bom.values())
     reduction_pct = round((1.0 - (total_pieces / max(1, total_studs))) * 100.0, 1)
     is_3d = safe_z > 1 or abstract_mode
@@ -140,45 +128,13 @@ def _build_mosaic_payload(
             "part_name": pname,
             "count": count,
         }
-        for (cid, cname, pid, pname), count in bom.items()
+        for (cid, cname, pid, pname), count in list(bom.items())[:25]
     ]
-
-    grid_label = (
-        f"{final_grid[0]}x{final_grid[1]} Frame"
-        if abstract_mode
-        else (f"{final_grid[0]}x{final_grid[1]}x{safe_z}" if is_3d else f"{final_grid[0]}x{final_grid[1]}")
-    )
-
-    if is_demo:
-        return {
-            "order_id": order_id,
-            "is_demo": True,
-            "is_unlocked": True,
-            "grid": grid_label,
-            "is_3d": is_3d,
-            "abstract_mode": abstract_mode,
-            "price_usd": 0,
-            "total_studs": total_studs,
-            "total_pieces": total_pieces,
-            "reduction_pct": reduction_pct,
-            "blurred_preview_image": hd_b64,
-            "preview_image": hd_b64,
-            "hd_image": hd_b64,
-            "blurred_manual_image": manual_b64,
-            "manual_image": manual_b64,
-            "xml_content": xml_string,
-            "top_parts": parts_summary[:25],
-            "parts_breakdown": parts_summary,
-        }
-
-    peek_b64 = make_peek_preview(output_png, blur_radius=16)
-    teaser_manual_b64 = make_blurred_manual_teaser(output_manual)
 
     return {
         "order_id": order_id,
-        "is_demo": False,
-        "is_unlocked": False,
-        "grid": grid_label,
+        "is_demo": is_demo,
+        "grid": f"{final_grid[0]}x{final_grid[1]} Frame" if abstract_mode else (f"{final_grid[0]}x{final_grid[1]}x{safe_z}" if is_3d else f"{final_grid[0]}x{final_grid[1]}"),
         "is_3d": is_3d,
         "abstract_mode": abstract_mode,
         "price_usd": price_usd,
@@ -186,9 +142,11 @@ def _build_mosaic_payload(
         "total_pieces": total_pieces,
         "reduction_pct": reduction_pct,
         "blurred_preview_image": peek_b64,
-        "preview_image": peek_b64,
-        "blurred_manual_image": teaser_manual_b64,
-        "top_parts": parts_summary[:25],
+        "preview_image": hd_b64,
+        "hd_image": hd_b64,
+        "manual_image": manual_b64,
+        "xml_content": xml_string,
+        "top_parts": parts_summary,
         "parts_breakdown": parts_summary,
     }
 
@@ -314,7 +272,6 @@ def unlock_order(order_id: str, x_internal_secret: str = Header(default="")):
 
     return {
         "order_id": order_id,
-        "is_unlocked": True,
         "preview_image": f"data:image/png;base64,{hd_b64}",
         "hd_image": f"data:image/png;base64,{hd_b64}",
         "manual_image": manual_b64,
@@ -449,7 +406,6 @@ async def lock_everyone_cell(req: Request):
 @app.post("/api/everyone/unlock")
 async def release_everyone_cell(req: Request):
     body = await req.json()
-    body["release"] = True
     client_id = str(body.get("client_id") or body.get("clientId") or "anon")
     raw_items = body.get("items") or body.get("tiles") or body.get("cells") or [body]
 

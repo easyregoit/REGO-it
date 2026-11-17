@@ -204,7 +204,6 @@ def serve_home():
 
 @app.get("/api/demo-image")
 def get_demo_image():
-    """Returns the built-in RE-GO demo PNG file."""
     demo_path = os.path.join(ORDERS_DIR, "builtin_demo.png")
     create_demo_image(demo_path)
     return FileResponse(demo_path, media_type="image/png", filename="rego_demo.png")
@@ -212,7 +211,6 @@ def get_demo_image():
 
 @app.get("/api/demo")
 def get_mandatory_demo_showcase():
-    """Returns the pre-built 3D RE-GO Demo Mosaic + Isometric Manual JSON."""
     demo_path = os.path.join(ORDERS_DIR, "builtin_demo.png")
     create_demo_image(demo_path)
     return _build_mosaic_payload(
@@ -329,14 +327,17 @@ def unlock_order(order_id: str, x_internal_secret: str = Header(default="")):
 # ============================================================================
 EVERYONE_FILE = os.path.join(ORDERS_DIR, "everyone_mosaic_128x64.json")
 EVERYONE_LOCK = threading.Lock()
-LOCK_TTL_SECONDS = 300  # 5-minute active selection lock
+LOCK_TTL_SECONDS = 300
 
 
 def _load_everyone_state() -> dict:
     if os.path.exists(EVERYONE_FILE):
         try:
             with open(EVERYONE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                data.setdefault("paid_cells", {})
+                data.setdefault("active_locks", {})
+                return data
         except Exception:
             pass
     return {"paid_cells": {}, "active_locks": {}}
@@ -355,80 +356,157 @@ def _purge_expired_locks(state: dict) -> bool:
     return len(expired) > 0
 
 
+def _parse_cell_coords(item: dict) -> tuple[int, int]:
+    if "cell_key" in item or "cellKey" in item or "key" in item:
+        raw_key = str(item.get("cell_key") or item.get("cellKey") or item.get("key"))
+        parts = raw_key.replace(":", ",").split(",")
+        return int(parts[0]), int(parts[1])
+    r = int(item.get("r", item.get("row", item.get("y", 0))))
+    c = int(item.get("c", item.get("col", item.get("x", 0))))
+    return r, c
+
+
+def _format_state_response(state: dict, **extra) -> dict:
+    return {
+        "ok": True,
+        "paid_cells": state["paid_cells"],
+        "paidCells": state["paid_cells"],
+        "cells": state["paid_cells"],
+        "active_locks": state["active_locks"],
+        "activeLocks": state["active_locks"],
+        "locks": state["active_locks"],
+        "paid_count": len(state["paid_cells"]),
+        **extra,
+    }
+
+
 @app.get("/api/everyone/state")
 async def get_everyone_state():
     with EVERYONE_LOCK:
         state = _load_everyone_state()
         if _purge_expired_locks(state):
             _save_everyone_state(state)
-        return state
+        return _format_state_response(state)
 
 
 @app.post("/api/everyone/lock")
 async def lock_everyone_cell(req: Request):
     body = await req.json()
-    r, c = int(body["r"]), int(body["c"])
-    if not (0 <= r < 64 and 0 <= c < 128):
-        raise HTTPException(status_code=400, detail="Coordinates out of 128x64 bounds.")
-
-    cell_key = f"{r},{c}"
-    client_id = str(body["client_id"])
-    piece = body.get("piece")
+    client_id = str(body.get("client_id") or body.get("clientId") or "anon")
+    action = str(body.get("action") or "").lower()
+    is_release = action in ("release", "unlock", "remove") or body.get("release") is True or body.get("unlock") is True
     now = time.time()
+
+    raw_items = body.get("items") or body.get("tiles") or body.get("cells")
+    if not raw_items:
+        raw_items = [body]
 
     with EVERYONE_LOCK:
         state = _load_everyone_state()
         _purge_expired_locks(state)
 
-        if cell_key in state["paid_cells"]:
-            raise HTTPException(status_code=409, detail="Cell already purchased.")
+        for item in raw_items:
+            r, c = _parse_cell_coords(item)
+            if not (0 <= r < 64 and 0 <= c < 128):
+                raise HTTPException(status_code=400, detail=f"Coordinates ({r},{c}) out of 128x64 bounds.")
+            cell_key = f"{r},{c}"
 
-        existing = state["active_locks"].get(cell_key)
-        if existing and existing["client_id"] != client_id:
-            raise HTTPException(status_code=409, detail="Cell is currently being selected by another user.")
+            if is_release:
+                existing = state["active_locks"].get(cell_key)
+                if existing and existing.get("client_id") == client_id:
+                    del state["active_locks"][cell_key]
+                continue
 
-        state["active_locks"][cell_key] = {
-            "client_id": client_id,
-            "piece": piece,
-            "expires_at": now + LOCK_TTL_SECONDS,
-        }
+            if cell_key in state["paid_cells"]:
+                raise HTTPException(status_code=409, detail=f"Box ({r},{c}) is already purchased.")
+
+            existing = state["active_locks"].get(cell_key)
+            if existing and existing.get("client_id") != client_id:
+                raise HTTPException(status_code=409, detail=f"Box ({r},{c}) is currently locked by another builder.")
+
+            piece = item.get("piece") or {
+                "part_key": item.get("part_key") or item.get("partKey") or item.get("shape") or "tile_1x1",
+                "color_id": item.get("color_id") or item.get("colorId") or item.get("color") or 1,
+                "orient": item.get("orient") or item.get("orientation") or item.get("rotation"),
+                "hex": item.get("hex"),
+            }
+
+            state["active_locks"][cell_key] = {
+                "r": r,
+                "c": c,
+                "client_id": client_id,
+                "clientId": client_id,
+                "piece": piece,
+                "expires_at": now + LOCK_TTL_SECONDS,
+                "expiresAt": int((now + LOCK_TTL_SECONDS) * 1000),
+            }
+
         _save_everyone_state(state)
-        return {"ok": True, "cell_key": cell_key, "state": state}
+        return _format_state_response(state, state=state)
 
 
 @app.post("/api/everyone/release")
+@app.post("/api/everyone/unlock")
 async def release_everyone_cell(req: Request):
     body = await req.json()
-    cell_key = f"{int(body['r'])},{int(body['c'])}"
-    client_id = str(body["client_id"])
+    body["release"] = True
+    client_id = str(body.get("client_id") or body.get("clientId") or "anon")
+    raw_items = body.get("items") or body.get("tiles") or body.get("cells") or [body]
 
     with EVERYONE_LOCK:
         state = _load_everyone_state()
-        existing = state["active_locks"].get(cell_key)
-        if existing and existing["client_id"] == client_id:
-            del state["active_locks"][cell_key]
-            _save_everyone_state(state)
-        return {"ok": True, "state": state}
+        for item in raw_items:
+            r, c = _parse_cell_coords(item)
+            cell_key = f"{r},{c}"
+            existing = state["active_locks"].get(cell_key)
+            if existing and existing.get("client_id") == client_id:
+                del state["active_locks"][cell_key]
+        _save_everyone_state(state)
+        return _format_state_response(state, state=state)
 
 
 @app.post("/api/everyone/commit")
-async def commit_everyone_cells(req: Request, x_internal_secret: str = Header(default="")):
-    if x_internal_secret != INTERNAL_UNLOCK_SECRET:
-        raise HTTPException(status_code=403, detail="Unauthorized")
-
+@app.post("/api/everyone/save")
+async def commit_everyone_cells(
+    req: Request,
+    x_internal_secret: str = Header(default=""),
+    authorization: str = Header(default=""),
+):
+    bearer = authorization.replace("Bearer ", "").strip() if authorization else ""
     body = await req.json()
-    items = body.get("items", [])
+    provided_secret = x_internal_secret or bearer or str(body.get("secret") or "")
+
+    if provided_secret != INTERNAL_UNLOCK_SECRET:
+        raise HTTPException(status_code=403, detail="Unauthorized commit request")
+
+    raw_items = body.get("items") or body.get("tiles") or body.get("cells") or []
 
     with EVERYONE_LOCK:
         state = _load_everyone_state()
-        for item in items:
-            cell_key = f"{int(item['r'])},{int(item['c'])}"
+        for item in raw_items:
+            r, c = _parse_cell_coords(item)
+            if not (0 <= r < 64 and 0 <= c < 128):
+                continue
+            cell_key = f"{r},{c}"
+            piece = item.get("piece") if isinstance(item.get("piece"), dict) else item
+            part_key = piece.get("part_key") or piece.get("partKey") or piece.get("shape") or "tile_1x1"
+            color_id = int(piece.get("color_id") or piece.get("colorId") or piece.get("color") or 1)
+            orient = piece.get("orient") or piece.get("orientation") or piece.get("rotation")
+            hex_val = piece.get("hex")
+
             state["paid_cells"][cell_key] = {
-                "part_key": item["part_key"],
-                "color_id": int(item["color_id"]),
-                "orient": item.get("orient"),
+                "r": r,
+                "c": c,
+                "part_key": part_key,
+                "partKey": part_key,
+                "color_id": color_id,
+                "colorId": color_id,
+                "orient": orient,
+                "orientation": orient,
+                "hex": hex_val,
                 "paid_at": int(time.time()),
             }
             state["active_locks"].pop(cell_key, None)
+
         _save_everyone_state(state)
-        return {"ok": True, "paid_count": len(state["paid_cells"]), "state": state}
+        return _format_state_response(state, state=state)

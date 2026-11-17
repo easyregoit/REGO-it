@@ -1,18 +1,20 @@
+import asyncio
 import base64
 import hashlib
+import json
 import os
 import tempfile
-from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
+import threading
+import time
+from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from PIL import Image, ImageDraw, ImageFilter
 from mosaic_engine import generate_brick_mosaic, export_bricklink_xml, create_demo_image
+from role_bot import bot as discord_bot, TOKEN as DISCORD_TOKEN
 
 app = FastAPI(title="REGO Mosaic Studio API")
 
-import asyncio
-from role_bot import bot as discord_bot, TOKEN as DISCORD_TOKEN
-
 
 @app.on_event("startup")
 async def start_discord_bot_in_background():
@@ -22,24 +24,6 @@ async def start_discord_bot_in_background():
     else:
         print("DISCORD_BOT_TOKEN not set; skipping Discord bot startup.")
 
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-import asyncio
-from role_bot import bot as discord_bot, TOKEN as DISCORD_TOKEN
-
-@app.on_event("startup")
-async def start_discord_bot_in_background():
-    if DISCORD_TOKEN:
-        asyncio.create_task(discord_bot.start(DISCORD_TOKEN))
-        print("Started REGO Role Bot background task on Render.")
-    else:
-        print("DISCORD_BOT_TOKEN not set; skipping Discord bot startup.")
 
 app.add_middleware(
     CORSMiddleware,
@@ -75,6 +59,19 @@ def make_peek_preview(img_path: str, blur_radius: int = 16) -> str:
 
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
         blurred.save(tmp.name, format="PNG")
+        with open(tmp.name, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("utf-8")
+    os.remove(tmp.name)
+    return f"data:image/png;base64,{b64}"
+
+
+def make_blurred_manual_teaser(manual_path: str) -> str:
+    """Creates a blurred teaser of the manual for locked user uploads."""
+    img = Image.open(manual_path).convert("RGB")
+    teaser = img.resize((900, int(900 * img.height / max(1, img.width))), Image.Resampling.BILINEAR)
+    teaser = teaser.filter(ImageFilter.GaussianBlur(radius=14))
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        teaser.save(tmp.name, format="PNG")
         with open(tmp.name, "rb") as f:
             b64 = base64.b64encode(f.read()).decode("utf-8")
     os.remove(tmp.name)
@@ -124,7 +121,6 @@ def _build_mosaic_payload(
     with open(output_manual, "rb") as man_f:
         manual_b64 = f"data:image/png;base64,{base64.b64encode(man_f.read()).decode('utf-8')}"
 
-    peek_b64 = hd_b64 if is_demo else make_peek_preview(output_png, blur_radius=16)
     total_pieces = sum(bom.values())
     reduction_pct = round((1.0 - (total_pieces / max(1, total_studs))) * 100.0, 1)
     is_3d = safe_z > 1 or abstract_mode
@@ -144,13 +140,45 @@ def _build_mosaic_payload(
             "part_name": pname,
             "count": count,
         }
-        for (cid, cname, pid, pname), count in list(bom.items())[:25]
+        for (cid, cname, pid, pname), count in bom.items()
     ]
+
+    grid_label = (
+        f"{final_grid[0]}x{final_grid[1]} Frame"
+        if abstract_mode
+        else (f"{final_grid[0]}x{final_grid[1]}x{safe_z}" if is_3d else f"{final_grid[0]}x{final_grid[1]}")
+    )
+
+    if is_demo:
+        return {
+            "order_id": order_id,
+            "is_demo": True,
+            "is_unlocked": True,
+            "grid": grid_label,
+            "is_3d": is_3d,
+            "abstract_mode": abstract_mode,
+            "price_usd": 0,
+            "total_studs": total_studs,
+            "total_pieces": total_pieces,
+            "reduction_pct": reduction_pct,
+            "blurred_preview_image": hd_b64,
+            "preview_image": hd_b64,
+            "hd_image": hd_b64,
+            "blurred_manual_image": manual_b64,
+            "manual_image": manual_b64,
+            "xml_content": xml_string,
+            "top_parts": parts_summary[:25],
+            "parts_breakdown": parts_summary,
+        }
+
+    peek_b64 = make_peek_preview(output_png, blur_radius=16)
+    teaser_manual_b64 = make_blurred_manual_teaser(output_manual)
 
     return {
         "order_id": order_id,
-        "is_demo": is_demo,
-        "grid": f"{final_grid[0]}x{final_grid[1]} Frame" if abstract_mode else (f"{final_grid[0]}x{final_grid[1]}x{safe_z}" if is_3d else f"{final_grid[0]}x{final_grid[1]}"),
+        "is_demo": False,
+        "is_unlocked": False,
+        "grid": grid_label,
         "is_3d": is_3d,
         "abstract_mode": abstract_mode,
         "price_usd": price_usd,
@@ -158,11 +186,9 @@ def _build_mosaic_payload(
         "total_pieces": total_pieces,
         "reduction_pct": reduction_pct,
         "blurred_preview_image": peek_b64,
-        "preview_image": hd_b64,
-        "hd_image": hd_b64,
-        "manual_image": manual_b64,
-        "xml_content": xml_string,
-        "top_parts": parts_summary,
+        "preview_image": peek_b64,
+        "blurred_manual_image": teaser_manual_b64,
+        "top_parts": parts_summary[:25],
         "parts_breakdown": parts_summary,
     }
 
@@ -173,7 +199,7 @@ def serve_home():
     index_path = os.path.join(script_dir, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)
-    return {"status": "REGO Mosaic Studio Python API v4 (Auto-Grid Fix + Tongue-and-Groove Manual) is running"}
+    return {"status": "REGO Mosaic Studio Python API v5 (Live Stripe + Everyone Mosaic 128x64) is running"}
 
 
 @app.get("/api/demo-image")
@@ -237,7 +263,6 @@ async def create_mosaic(
         with open(input_path, "wb") as f:
             f.write(file_bytes)
 
-        # Cleanly resolve grid_size without ever creating a (64, None) tuple
         if abstract_mode:
             grid_size = (32, 32)
         elif preset in PRESET_MAP and PRESET_MAP[preset] is not None:
@@ -291,8 +316,119 @@ def unlock_order(order_id: str, x_internal_secret: str = Header(default="")):
 
     return {
         "order_id": order_id,
+        "is_unlocked": True,
         "preview_image": f"data:image/png;base64,{hd_b64}",
         "hd_image": f"data:image/png;base64,{hd_b64}",
         "manual_image": manual_b64,
         "xml_content": xml_string,
     }
+
+
+# ============================================================================
+# THE EVERYONE MOSAIC (128x64 Collaborative Canvas — $0.50 per 1x1 Tile)
+# ============================================================================
+EVERYONE_FILE = os.path.join(ORDERS_DIR, "everyone_mosaic_128x64.json")
+EVERYONE_LOCK = threading.Lock()
+LOCK_TTL_SECONDS = 300  # 5-minute active selection lock
+
+
+def _load_everyone_state() -> dict:
+    if os.path.exists(EVERYONE_FILE):
+        try:
+            with open(EVERYONE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"paid_cells": {}, "active_locks": {}}
+
+
+def _save_everyone_state(state: dict) -> None:
+    with open(EVERYONE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f)
+
+
+def _purge_expired_locks(state: dict) -> bool:
+    now = time.time()
+    expired = [k for k, v in state["active_locks"].items() if v.get("expires_at", 0) < now]
+    for k in expired:
+        del state["active_locks"][k]
+    return len(expired) > 0
+
+
+@app.get("/api/everyone/state")
+async def get_everyone_state():
+    with EVERYONE_LOCK:
+        state = _load_everyone_state()
+        if _purge_expired_locks(state):
+            _save_everyone_state(state)
+        return state
+
+
+@app.post("/api/everyone/lock")
+async def lock_everyone_cell(req: Request):
+    body = await req.json()
+    r, c = int(body["r"]), int(body["c"])
+    if not (0 <= r < 64 and 0 <= c < 128):
+        raise HTTPException(status_code=400, detail="Coordinates out of 128x64 bounds.")
+
+    cell_key = f"{r},{c}"
+    client_id = str(body["client_id"])
+    piece = body.get("piece")
+    now = time.time()
+
+    with EVERYONE_LOCK:
+        state = _load_everyone_state()
+        _purge_expired_locks(state)
+
+        if cell_key in state["paid_cells"]:
+            raise HTTPException(status_code=409, detail="Cell already purchased.")
+
+        existing = state["active_locks"].get(cell_key)
+        if existing and existing["client_id"] != client_id:
+            raise HTTPException(status_code=409, detail="Cell is currently being selected by another user.")
+
+        state["active_locks"][cell_key] = {
+            "client_id": client_id,
+            "piece": piece,
+            "expires_at": now + LOCK_TTL_SECONDS,
+        }
+        _save_everyone_state(state)
+        return {"ok": True, "cell_key": cell_key, "state": state}
+
+
+@app.post("/api/everyone/release")
+async def release_everyone_cell(req: Request):
+    body = await req.json()
+    cell_key = f"{int(body['r'])},{int(body['c'])}"
+    client_id = str(body["client_id"])
+
+    with EVERYONE_LOCK:
+        state = _load_everyone_state()
+        existing = state["active_locks"].get(cell_key)
+        if existing and existing["client_id"] == client_id:
+            del state["active_locks"][cell_key]
+            _save_everyone_state(state)
+        return {"ok": True, "state": state}
+
+
+@app.post("/api/everyone/commit")
+async def commit_everyone_cells(req: Request, x_internal_secret: str = Header(default="")):
+    if x_internal_secret != INTERNAL_UNLOCK_SECRET:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    body = await req.json()
+    items = body.get("items", [])
+
+    with EVERYONE_LOCK:
+        state = _load_everyone_state()
+        for item in items:
+            cell_key = f"{int(item['r'])},{int(item['c'])}"
+            state["paid_cells"][cell_key] = {
+                "part_key": item["part_key"],
+                "color_id": int(item["color_id"]),
+                "orient": item.get("orient"),
+                "paid_at": int(time.time()),
+            }
+            state["active_locks"].pop(cell_key, None)
+        _save_everyone_state(state)
+        return {"ok": True, "paid_count": len(state["paid_cells"]), "state": state}

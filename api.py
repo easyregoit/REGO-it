@@ -436,6 +436,8 @@ async def commit_everyone_cells(
         raise HTTPException(status_code=403, detail="Unauthorized commit request")
 
     raw_items = body.get("items") or body.get("tiles") or body.get("cells") or []
+    top_pi = body.get("payment_intent") or body.get("paymentIntent") or body.get("payment_intent_id")
+    top_sid = body.get("session_id") or body.get("sessionId")
 
     with EVERYONE_LOCK:
         state = _load_everyone_state()
@@ -447,7 +449,7 @@ async def commit_everyone_cells(
             piece = item.get("piece") if isinstance(item.get("piece"), dict) else item
             part_key = piece.get("part_key") or piece.get("partKey") or piece.get("shape") or "tile_1x1"
             color_id = int(piece.get("color_id") or piece.get("colorId") or piece.get("color") or 1)
-            orient = piece.get("orient") or piece.get("orientation") or piece.get("rotation")
+            orient = piece.get("orient") or piece.get("orientation") or item.get("rotation")
             hex_val = piece.get("hex")
 
             state["paid_cells"][cell_key] = {
@@ -460,9 +462,54 @@ async def commit_everyone_cells(
                 "orient": orient,
                 "orientation": orient,
                 "hex": hex_val,
+                "payment_intent": item.get("payment_intent") or item.get("paymentIntent") or top_pi,
+                "session_id": item.get("session_id") or item.get("sessionId") or top_sid,
                 "paid_at": int(time.time()),
             }
             state["active_locks"].pop(cell_key, None)
 
         _save_everyone_state(state)
         return _format_state_response(state, state=state)
+
+
+@app.post("/api/everyone/moderate")
+async def moderate_everyone_cells(
+    req: Request,
+    x_internal_secret: str = Header(default=""),
+    authorization: str = Header(default=""),
+):
+    bearer = authorization.replace("Bearer ", "").strip() if authorization else ""
+    body = await req.json()
+    provided_secret = x_internal_secret or bearer or str(body.get("secret") or "")
+
+    if provided_secret != INTERNAL_UNLOCK_SECRET:
+        raise HTTPException(status_code=403, detail="Unauthorized creator moderation request")
+
+    raw_items = body.get("cells") or body.get("items") or body.get("tiles") or []
+    removed_paid = []
+    removed_unpaid = []
+
+    with EVERYONE_LOCK:
+        state = _load_everyone_state()
+        for item in raw_items:
+            if isinstance(item, str):
+                parts = item.replace(":", ",").split(",")
+                r, c = int(parts[0]), int(parts[1])
+            else:
+                r, c = _parse_cell_coords(item)
+            cell_key = f"{r},{c}"
+
+            if cell_key in state["paid_cells"]:
+                paid_info = state["paid_cells"].pop(cell_key)
+                removed_paid.append({"cell_key": cell_key, **paid_info})
+            if cell_key in state["active_locks"]:
+                state["active_locks"].pop(cell_key, None)
+                removed_unpaid.append(cell_key)
+
+        _save_everyone_state(state)
+        return _format_state_response(
+            state,
+            removed_paid=removed_paid,
+            removed_unpaid=removed_unpaid,
+            state=state,
+        )

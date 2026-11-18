@@ -1,6 +1,10 @@
 import asyncio
 import base64
 import hashlib
+import hmac
+import re
+import fcntl
+from contextlib import contextmanager
 import json
 import os
 import tempfile
@@ -32,7 +36,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-INTERNAL_UNLOCK_SECRET = os.getenv("INTERNAL_UNLOCK_SECRET", "rego_unlock_8492019482_x9k2m7p4")
+INTERNAL_UNLOCK_SECRET = os.getenv("INTERNAL_UNLOCK_SECRET")
 ORDERS_DIR = os.path.join(tempfile.gettempdir(), "rego_orders")
 os.makedirs(ORDERS_DIR, exist_ok=True)
 
@@ -250,7 +254,7 @@ async def create_mosaic(
 
 @app.get("/api/unlock/{order_id}")
 def unlock_order(order_id: str, x_internal_secret: str = Header(default="")):
-    if x_internal_secret != INTERNAL_UNLOCK_SECRET:
+    if not INTERNAL_UNLOCK_SECRET or x_internal_secret != INTERNAL_UNLOCK_SECRET:
         raise HTTPException(status_code=403, detail="Unauthorized unlock request")
 
     output_png = os.path.join(ORDERS_DIR, f"{order_id}_hd.png")
@@ -287,6 +291,13 @@ EVERYONE_LOCK = threading.Lock()
 LOCK_TTL_SECONDS = 300
 
 
+@contextmanager
+def _board_transaction():
+    with EVERYONE_LOCK, open(EVERYONE_FILE + '.lock', 'a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
 def _load_everyone_state() -> dict:
     if os.path.exists(EVERYONE_FILE):
         try:
@@ -295,14 +306,17 @@ def _load_everyone_state() -> dict:
                 data.setdefault("paid_cells", {})
                 data.setdefault("active_locks", {})
                 return data
-        except Exception:
-            pass
+        except (OSError, ValueError) as exc:
+            raise HTTPException(503, 'Board storage unavailable') from exc
     return {"paid_cells": {}, "active_locks": {}}
 
 
 def _save_everyone_state(state: dict) -> None:
-    with open(EVERYONE_FILE, "w", encoding="utf-8") as f:
+    with open(EVERYONE_FILE + '.tmp', 'w', encoding='utf-8') as f:
         json.dump(state, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(EVERYONE_FILE + '.tmp', EVERYONE_FILE)
 
 
 def _purge_expired_locks(state: dict) -> bool:
@@ -323,12 +337,15 @@ def _parse_cell_coords(item: dict) -> tuple[int, int]:
     return r, c
 
 
-def _format_state_response(state: dict, **extra) -> dict:
+def _format_state_response(state: dict, /, **extra) -> dict:
+    cells = {k: {field: value for field, value in row.items() if field not in ('payment_intent', 'session_id')} for k, row in state['paid_cells'].items()}
+    if 'state' in extra:
+        extra['state'] = {'paid_cells': cells, 'active_locks': state['active_locks']}
     return {
         "ok": True,
-        "paid_cells": state["paid_cells"],
-        "paidCells": state["paid_cells"],
-        "cells": state["paid_cells"],
+        "paid_cells": cells,
+        "paidCells": cells,
+        "cells": cells,
         "active_locks": state["active_locks"],
         "activeLocks": state["active_locks"],
         "locks": state["active_locks"],
@@ -339,7 +356,7 @@ def _format_state_response(state: dict, **extra) -> dict:
 
 @app.get("/api/everyone/state")
 async def get_everyone_state():
-    with EVERYONE_LOCK:
+    with _board_transaction():
         state = _load_everyone_state()
         if _purge_expired_locks(state):
             _save_everyone_state(state)
@@ -358,7 +375,7 @@ async def lock_everyone_cell(req: Request):
     if not raw_items:
         raw_items = [body]
 
-    with EVERYONE_LOCK:
+    with _board_transaction():
         state = _load_everyone_state()
         _purge_expired_locks(state)
 
@@ -409,7 +426,7 @@ async def release_everyone_cell(req: Request):
     client_id = str(body.get("client_id") or body.get("clientId") or "anon")
     raw_items = body.get("items") or body.get("tiles") or body.get("cells") or [body]
 
-    with EVERYONE_LOCK:
+    with _board_transaction():
         state = _load_everyone_state()
         for item in raw_items:
             r, c = _parse_cell_coords(item)
@@ -419,6 +436,51 @@ async def release_everyone_cell(req: Request):
                 del state["active_locks"][cell_key]
         _save_everyone_state(state)
         return _format_state_response(state, state=state)
+
+
+@app.post('/api/everyone/moderate')
+async def moderate_board(req: Request, x_internal_secret: str = Header(default='')):
+    if not INTERNAL_UNLOCK_SECRET or not hmac.compare_digest(x_internal_secret.encode(), INTERNAL_UNLOCK_SECRET.encode()):
+        raise HTTPException(403, 'Creator access required')
+    body = await req.json()
+    op = req.headers.get('idempotency-key', '')
+    if not re.fullmatch(r'[a-f0-9-]{36}', op):
+        raise HTTPException(400, 'Operation ID required')
+    with _board_transaction():
+        state = _load_everyone_state()
+        ledger = state.setdefault('moderations', {})
+        pending = next((key for key, value in ledger.items() if not value.get('done')), None)
+        if body.get('inspect'):
+            return {'pending': pending}
+        receipt = ledger.get(op)
+        if body.get('complete'):
+            if not receipt:
+                raise HTTPException(404, 'Unknown operation')
+            receipt['done'] = True
+            _save_everyone_state(state)
+            return {'ok': True}
+        if receipt:
+            return receipt
+        if pending:
+            raise HTTPException(409, 'Finish the pending refund first')
+        cells = body.get('cells')
+        if not isinstance(cells, list) or not 0 < len(cells) <= 8192:
+            raise HTTPException(400, 'Select valid boxes')
+        for key in cells:
+            if not isinstance(key, str) or not re.fullmatch(r'(0|[1-9]\d?),(0|[1-9]\d{0,2})', key) or int(key.split(',')[0]) >= 64 or int(key.split(',')[1]) >= 128:
+                raise HTTPException(400, 'Invalid coordinate')
+        paid, released = [], 0
+        for key in dict.fromkeys(cells):
+            row = state['paid_cells'].pop(key, None)
+            if row:
+                if not row.get('payment_intent') or not row.get('session_id'):
+                    raise HTTPException(409, 'Selection includes a legacy purchase; reconcile its payment first')
+                paid.append({'cell': key, 'payment_intent': row['payment_intent']})
+                state.setdefault('removed_sessions', {}).setdefault(row['session_id'], []).append(key)
+            released += int(state['active_locks'].pop(key, None) is not None)
+        ledger[op] = receipt = {'paid_items': paid, 'released': released, 'cells': list(dict.fromkeys(cells)), 'done': False}
+        _save_everyone_state(state)
+        return receipt
 
 
 @app.post("/api/everyone/commit")
@@ -432,21 +494,29 @@ async def commit_everyone_cells(
     body = await req.json()
     provided_secret = x_internal_secret or bearer or str(body.get("secret") or "")
 
-    if provided_secret != INTERNAL_UNLOCK_SECRET:
-        raise HTTPException(status_code=403, detail="Unauthorized commit request")
+    if not INTERNAL_UNLOCK_SECRET or not hmac.compare_digest(provided_secret.encode(), INTERNAL_UNLOCK_SECRET.encode()):
+        raise HTTPException(status_code=403, detail='Unauthorized commit request')
+    intent, session = body.get('payment_intent'), body.get('session_id')
+    if not isinstance(intent, str) or not re.fullmatch(r'pi_[A-Za-z0-9]+', intent) or not isinstance(session, str) or not re.fullmatch(r'cs_[\w]+', session):
+        raise HTTPException(400, 'Verified payment references required')
 
     raw_items = body.get("items") or body.get("tiles") or body.get("cells") or []
 
-    with EVERYONE_LOCK:
+    with _board_transaction():
         state = _load_everyone_state()
         for item in raw_items:
             r, c = _parse_cell_coords(item)
             if not (0 <= r < 64 and 0 <= c < 128):
                 continue
             cell_key = f"{r},{c}"
+            if cell_key in state.get('removed_sessions', {}).get(session, []):
+                raise HTTPException(409, 'Placement has been moderated')
+            existing = state['paid_cells'].get(cell_key)
+            if existing and existing.get('session_id') != session:
+                raise HTTPException(409, 'Box already purchased')
             piece = item.get("piece") if isinstance(item.get("piece"), dict) else item
             part_key = piece.get("part_key") or piece.get("partKey") or piece.get("shape") or "tile_1x1"
-            color_id = int(piece.get("color_id") or piece.get("colorId") or piece.get("color") or 1)
+            color_id = piece.get('color_id') or piece.get('colorId') or piece.get('color') or 1
             orient = piece.get("orient") or piece.get("orientation") or piece.get("rotation")
             hex_val = piece.get("hex")
 
@@ -460,6 +530,7 @@ async def commit_everyone_cells(
                 "orient": orient,
                 "orientation": orient,
                 "hex": hex_val,
+                'session_id': session, 'payment_intent': intent, 'piece': piece,
                 "paid_at": int(time.time()),
             }
             state["active_locks"].pop(cell_key, None)
